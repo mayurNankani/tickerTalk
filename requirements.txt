@@ -1,0 +1,6 @@
+pandas
+numpy
+yfinance
+ta  # Technical analysis library
+python-dotenv
+yahooquery  # For company symbol search
