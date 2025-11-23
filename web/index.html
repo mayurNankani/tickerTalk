@@ -1,0 +1,60 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Stock Market MCP Agent</title>
+    <style>
+        body { font-family: Arial, sans-serif; background: #f7f7f7; margin: 0; padding: 0; }
+        .container { max-width: 600px; margin: 40px auto; background: #fff; border-radius: 8px; box-shadow: 0 2px 8px rgba(0,0,0,0.1); padding: 32px; }
+        h1 { text-align: center; color: #2c3e50; }
+        form { display: flex; gap: 8px; margin-bottom: 24px; }
+        input[type="text"] { flex: 1; padding: 10px; border: 1px solid #ccc; border-radius: 4px; }
+        button { padding: 10px 20px; background: #2980b9; color: #fff; border: none; border-radius: 4px; cursor: pointer; }
+        button:hover { background: #3498db; }
+        .result { background: #f0f8ff; border-radius: 4px; padding: 16px; margin-top: 16px; }
+        @media (max-width: 800px) {
+            .result .horizon-cards {
+                flex-direction: column;
+            }
+            .result .horizon-cards > div {
+                min-width: 0;
+                width: 100%;
+                margin-bottom: 12px;
+            }
+        }
+        .error { color: #c0392b; }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>Stock Market MCP Agent</h1>
+        <form id="companyForm">
+            <input type="text" id="companyInput" placeholder="Enter company name..." required />
+            <button type="submit">Analyze</button>
+        </form>
+        <div id="output"></div>
+    </div>
+    <script>
+        const form = document.getElementById('companyForm');
+        const input = document.getElementById('companyInput');
+        const output = document.getElementById('output');
+        form.onsubmit = async (e) => {
+            e.preventDefault();
+            output.innerHTML = 'Analyzing...';
+            const res = await fetch('/analyze', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ company: input.value })
+            });
+            const data = await res.json();
+            if (data.error) {
+                output.innerHTML = `<div class='error'>${data.error}</div>`;
+            } else {
+                // Wrap horizon cards for responsive styling
+                output.innerHTML = `<div class='result'>${data.result.replace('display:flex;gap:12px;flex-wrap:wrap;margin-top:8px;', 'display:flex;gap:12px;flex-wrap:wrap;margin-top:8px;' + '" class="horizon-cards"')}</div>`;
+            }
+        };
+    </script>
+</body>
+</html>
