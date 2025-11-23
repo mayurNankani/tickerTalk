@@ -24,18 +24,49 @@
             }
         }
         .error { color: #c0392b; }
+        .tab-container { display: flex; gap: 8px; margin-bottom: 18px; }
+        .tab-btn { padding: 8px 18px; border: none; border-radius: 4px 4px 0 0; background: #eaeaea; cursor: pointer; font-weight: bold; }
+        .tab-btn.active { background: #f0f8ff; color: #2980b9; border-bottom: 2px solid #2980b9; }
+        .tab-content { background: #f0f8ff; border-radius: 0 0 4px 4px; padding: 16px; }
     </style>
 </head>
 <body>
     <div class="container">
         <h1>Stock Market MCP Agent</h1>
-        <form id="companyForm">
-            <input type="text" id="companyInput" placeholder="Enter company name..." required />
-            <button type="submit">Analyze</button>
-        </form>
-        <div id="output"></div>
+        <div class="tab-container">
+          <button class="tab-btn active" onclick="showTab('analyze')">Analyze</button>
+          <button class="tab-btn" onclick="showTab('chat')">Chat</button>
+        </div>
+        <div id="analyzeTab" class="tab-content" style="display:block;">
+          <form id="companyForm">
+              <input type="text" id="companyInput" placeholder="Enter company name..." required />
+              <button type="submit">Analyze</button>
+          </form>
+          <div id="output"></div>
+        </div>
+                <div id="chatTab" class="tab-content" style="display:none;">
+                    <div style="display:flex;gap:8px;margin-bottom:10px;">
+                        <form id="chatForm" style="flex:1;display:flex;gap:8px;margin-bottom:0;">
+                            <input type="text" id="chatInput" placeholder="Ask about a company or stock..." required />
+                            <button type="submit">Send</button>
+                        </form>
+                        <button id="newStockBtn" style="background:#e67e22;color:#fff;padding:10px 16px;border:none;border-radius:4px;cursor:pointer;">New Stock Conversation</button>
+                    </div>
+                    <div id="chatOutput" style="min-height:80px;"></div>
+                </div>
     </div>
     <script>
+        function showTab(tab) {
+            document.querySelectorAll('.tab-btn').forEach(btn => btn.classList.remove('active'));
+            document.querySelectorAll('.tab-content').forEach(tabEl => tabEl.style.display = 'none');
+            if(tab === 'analyze') {
+                document.querySelector('.tab-btn').classList.add('active');
+                document.getElementById('analyzeTab').style.display = 'block';
+            } else {
+                document.querySelectorAll('.tab-btn')[1].classList.add('active');
+                document.getElementById('chatTab').style.display = 'block';
+            }
+        }
         const form = document.getElementById('companyForm');
         const input = document.getElementById('companyInput');
         const output = document.getElementById('output');
@@ -54,6 +85,45 @@
                 // Wrap horizon cards for responsive styling
                 output.innerHTML = `<div class='result'>${data.result.replace('display:flex;gap:12px;flex-wrap:wrap;margin-top:8px;', 'display:flex;gap:12px;flex-wrap:wrap;margin-top:8px;' + '" class="horizon-cards"')}</div>`;
             }
+        };
+        const chatForm = document.getElementById('chatForm');
+        const chatInput = document.getElementById('chatInput');
+        const chatOutput = document.getElementById('chatOutput');
+        let chatHistory = [];
+        let lastStock = '';
+        const newStockBtn = document.getElementById('newStockBtn');
+        newStockBtn.onclick = () => {
+            chatHistory = [];
+            lastStock = '';
+            chatOutput.innerHTML = '';
+            chatInput.value = '';
+            chatInput.focus();
+        };
+        chatForm.onsubmit = async (e) => {
+            e.preventDefault();
+            const userMsg = chatInput.value.trim();
+            // If this is the first message or user enters a new stock, reset chat
+            if (chatHistory.length === 0 || (userMsg && userMsg.toLowerCase() !== lastStock.toLowerCase() && chatHistory.length === 1)) {
+                chatHistory = [];
+                chatOutput.innerHTML = '';
+                lastStock = userMsg;
+            }
+            chatHistory.push({role:'user', content:userMsg});
+            chatOutput.innerHTML += `<div style='margin:18px 0 8px 0;'><b>You:</b> ${userMsg}</div>`;
+            chatInput.value = '';
+            const res = await fetch('/chat', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ history: chatHistory })
+            });
+            const data = await res.json();
+            if(data.reply) {
+                chatHistory.push({role:'assistant', content:data.reply});
+                chatOutput.innerHTML += `<div style='margin-bottom:18px;'><b>Agent:</b></div><span class='agent-reply'></span>`;
+                // Render as HTML for markup support
+                chatOutput.querySelectorAll('.agent-reply')[chatOutput.querySelectorAll('.agent-reply').length-1].innerHTML = data.reply;
+            }
+            chatOutput.scrollTop = chatOutput.scrollHeight;
         };
     </script>
 </body>
