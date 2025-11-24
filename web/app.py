@@ -3,6 +3,7 @@ import sys
 import os
 import re
 import requests
+import json
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 from src.tools.company_search import CompanySearch
 from src.mcp_agent import YahooFinanceAgent
@@ -133,26 +134,28 @@ def analyze():
         ) + '</ul>'
 
     quote_html = format_quote_html(quote_result)
-    result = (
-        f"<b>{company_name} ({ticker})</b><br><br>"
-        f"{quote_html}<br><br>"
-        f"{news_html}<br><br>"
+    # Compose recommendations block and rewrite only that with LLM
+    recommendations_html = (
         f"<b>Time Horizon Recommendations:</b><br><br>"
         f"{expand_block('Short-term (1 week)', short.get('label', 'N/A'), heatmap(short.get('label', 'N/A')), to_bullets(add_tooltips(short.get('summary',''))), 1)}"
         f"{expand_block('Medium-term (3 months)', medium_label, heatmap(medium_label), to_bullets(add_tooltips(medium_summary)), 2)}"
         f"{expand_block('Long-term (6-12 months)', long_label, heatmap(long_label), to_bullets(add_tooltips(long_summary)), 3)}"
     )
-    # Make result more human-friendly using LLM
-    result_human = make_human(result)
-    return jsonify({'result': result_human})
+    recommendations_human = make_human(recommendations_html)
+    result = (
+        f"<b>{company_name} ({ticker})</b><br><br>"
+        f"{quote_html}<br><br>"
+        f"{news_html}<br><br>"
+        f"{recommendations_human}"
+    )
+    return jsonify({'result': result})
 
 @app.route('/chat', methods=['POST'])
 def chat():
     data = request.get_json()
     history = data.get('history', [])
-    GEMINI_API_KEY = os.getenv('GEMINI_API_KEY')
-    if not GEMINI_API_KEY:
-        return jsonify({'reply': "Gemini API key not set. Please set GEMINI_API_KEY in your environment."})
+
+    llm_provider = os.getenv('LLM_PROVIDER', 'gemini').lower()
 
     # Use Flask session to store analysis context per user
     if 'analysis_context' not in session:
@@ -189,85 +192,145 @@ def chat():
                 f'<li><a href="{item["url"]}" target="_blank">{item["headline"]}</a></li>' for item in news_result['news'] if item.get('headline')
             ) + '</ul>'
         quote_html = format_quote_html(quote_result)
-        result = (
-            f"<b>{company_name} ({ticker})</b><br><br>"
-            f"{quote_html}<br><br>"
-            f"{news_html}<br><br><br><br><br>"
+        recommendations_html = (
             f"<b>Time Horizon Recommendations:</b><br><br>"
             f"{expand_block('Short-term (1 week)', short.get('label', 'N/A'), heatmap(short.get('label', 'N/A')), to_bullets(add_tooltips(short.get('summary',''))), 1)}"
             f"{expand_block('Medium-term (3 months)', medium_label, heatmap(medium_label), to_bullets(add_tooltips(medium_summary)), 2)}"
             f"{expand_block('Long-term (6-12 months)', long_label, heatmap(long_label), to_bullets(add_tooltips(long_summary)), 3)}"
         )
-        result_human = make_human(result)
-        session['analysis_context'] = result_human
-        return jsonify({'reply': result_human})
-
-    # For follow-up messages, allow Gemini to use outside knowledge
-    gemini_history = []
-    # Add the analysis context as a system message for reference, but do not restrict Gemini
-    gemini_history.append({'role': 'user', 'parts': [{'text': f"Here is the stock analysis context for reference (from yfinance and internal agents):\n{session['analysis_context']}"}]})
-    # Add only the latest user message as the follow-up
-    if history:
-        gemini_history.append({'role': 'user', 'parts': [{'text': history[-1]['content']}]})
-    try:
-        r = requests.post(
-            'https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent',
-            headers={
-                'Content-Type': 'application/json'
-            },
-            params={
-                'key': GEMINI_API_KEY
-            },
-            json={
-                'contents': gemini_history
-            },
-            timeout=15
+        recommendations_human = make_human(recommendations_html)
+        result = (
+            f"<b>{company_name} ({ticker})</b><br><br>"
+            f"{quote_html}<br><br>"
+            f"{news_html}<br><br>"
+            f"{recommendations_human}"
         )
-        r.raise_for_status()
-        reply = r.json()['candidates'][0]['content']['parts'][0]['text']
-        # Filter out code/tool responses
-        if reply.strip().startswith('```') or 'tool_code' in reply or 'get_stock_info' in reply:
-            reply = "I don't know. Please ask about information shown above or request a different stock."
-    except Exception as e:
-        reply = f"Sorry, Gemini could not process your request. ({e})"
-    return jsonify({'reply': reply})
+        session['analysis_context'] = result
+        return jsonify({'reply': result})
 
-# Helper to call Gemini API (Google's LLM)
+    # For follow-up messages, use selected LLM
+    if llm_provider == 'ollama':
+        # Use Ollama Llama3 for chat
+        context = session['analysis_context']
+        user_message = history[-1]['content'] if history else ''
+        prompt = (
+            f"Here is the stock analysis context for reference (from yfinance and internal agents):\n{context}\n\n"
+            f"Now answer the user's question: {user_message}"
+        )
+        try:
+            r = requests.post(
+                'http://localhost:11434/api/chat',
+                json={
+                    'model': 'llama3',
+                    'messages': [
+                        {'role': 'user', 'content': prompt}
+                    ],
+                    'stream': False
+                },
+                timeout=60
+            )
+            r.raise_for_status()
+            reply = r.json()['message']['content']
+        except Exception as e:
+            reply = f"Sorry, Llama3 (Ollama) could not process your request. ({e})"
+        return jsonify({'reply': reply})
+    else:
+        # Default: Gemini
+        GEMINI_API_KEY = os.getenv('GEMINI_API_KEY')
+        if not GEMINI_API_KEY:
+            return jsonify({'reply': "Gemini API key not set. Please set GEMINI_API_KEY in your environment."})
+        gemini_history = []
+        gemini_history.append({'role': 'user', 'parts': [{'text': f"Here is the stock analysis context for reference (from yfinance and internal agents):\n{session['analysis_context']}"}]})
+        if history:
+            gemini_history.append({'role': 'user', 'parts': [{'text': history[-1]['content']}]})
+        try:
+            r = requests.post(
+                'https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent',
+                headers={
+                    'Content-Type': 'application/json'
+                },
+                params={
+                    'key': GEMINI_API_KEY
+                },
+                json={
+                    'contents': gemini_history
+                },
+                timeout=15
+            )
+            r.raise_for_status()
+            reply = r.json()['candidates'][0]['content']['parts'][0]['text']
+            if reply.strip().startswith('```') or 'tool_code' in reply or 'get_stock_info' in reply:
+                reply = "I don't know. Please ask about information shown above or request a different stock."
+        except Exception as e:
+            reply = f"Sorry, Gemini could not process your request. ({e})"
+        return jsonify({'reply': reply})
+
+
+# Helper to call LLM (Gemini or Ollama Llama3)
 def make_human(response_html):
-    GEMINI_API_KEY = os.getenv('GEMINI_API_KEY')
-    if not GEMINI_API_KEY:
-        return response_html  # fallback if no key
-    prompt = (
-        "You are a helpful stock market assistant. Only use the information provided below, which comes from yfinance and internal agents. "
-        "If you do not know the answer from the provided information, reply: 'I don't know.' "
-        "Do not use any outside knowledge or make up answers. "
-        "Rewrite the following stock analysis response to sound more human, conversational, and friendly, but keep all the facts and HTML formatting.\n\n"
-        f"{response_html}"
-    )
-    try:
-        r = requests.post(
-            'https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent',
-            headers={
-                'Content-Type': 'application/json'
-            },
-            params={
-                'key': GEMINI_API_KEY
-            },
-            json={
-                'contents': [
-                    {'role': 'user', 'parts': [{'text': prompt}]}
-                ]
-            },
-            timeout=15
+    llm_provider = os.getenv('LLM_PROVIDER', 'gemini').lower()
+    if llm_provider == 'ollama':
+        # Use Ollama Llama3
+        prompt = (
+            "You are a helpful stock market assistant. Only use the information provided below, which comes from yfinance and internal agents. "
+            "If you do not know the answer from the provided information, reply: 'I don't know.' "
+            "Do not use any outside knowledge or make up answers. "
+            "Rewrite the following stock analysis recommendations to sound more human, conversational, and friendly, but keep ALL the HTML tags and formatting EXACTLY as in the input. Do NOT remove, escape, or alter any HTML tags.\n\n"
+            f"{response_html}"
         )
-        r.raise_for_status()
-        reply = r.json()['candidates'][0]['content']['parts'][0]['text']
-        # Filter out code/tool responses
-        if reply.strip().startswith('```') or 'tool_code' in reply or 'get_stock_info' in reply:
-            return "I don't know. Please ask about information shown above or request a different stock."
-        return reply
-    except Exception:
-        return response_html
+        try:
+            r = requests.post(
+                'http://localhost:11434/api/chat',
+                json={
+                    'model': 'llama3',
+                    'messages': [
+                        {'role': 'user', 'content': prompt}
+                    ],
+                    'stream': False
+                },
+                timeout=60
+            )
+            r.raise_for_status()
+            reply = r.json()['message']['content']
+            return reply
+        except Exception:
+            return response_html
+    else:
+        # Default: Gemini
+        GEMINI_API_KEY = os.getenv('GEMINI_API_KEY')
+        if not GEMINI_API_KEY:
+            return response_html  # fallback if no key
+        prompt = (
+            "You are a helpful stock market assistant. Only use the information provided below, which comes from yfinance and internal agents. "
+            "If you do not know the answer from the provided information, reply: 'I don't know.' "
+            "Do not use any outside knowledge or make up answers. "
+            "Rewrite the following stock analysis recommendations to sound more human, conversational, and friendly, but keep ALL the HTML tags and formatting EXACTLY as in the input. Do NOT remove, escape, or alter any HTML tags.\n\n"
+            f"{response_html}"
+        )
+        try:
+            r = requests.post(
+                'https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent',
+                headers={
+                    'Content-Type': 'application/json'
+                },
+                params={
+                    'key': GEMINI_API_KEY
+                },
+                json={
+                    'contents': [
+                        {'role': 'user', 'parts': [{'text': prompt}]}
+                    ]
+                },
+                timeout=15
+            )
+            r.raise_for_status()
+            reply = r.json()['candidates'][0]['content']['parts'][0]['text']
+            # Filter out code/tool responses
+            if reply.strip().startswith('```') or 'tool_code' in reply or 'get_stock_info' in reply:
+                return "I don't know. Please ask about information shown above or request a different stock."
+            return reply
+        except Exception:
+            return response_html
 
 if __name__ == '__main__':
     app.run(debug=True)
