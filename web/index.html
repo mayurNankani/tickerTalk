@@ -45,11 +45,16 @@
           <div id="output"></div>
         </div>
                 <div id="chatTab" class="tab-content" style="display:none;">
-                    <div style="display:flex;gap:8px;margin-bottom:10px;">
+                    <div style="display:flex;gap:8px;margin-bottom:10px;align-items:center;">
                         <form id="chatForm" style="flex:1;display:flex;gap:8px;margin-bottom:0;">
                             <input type="text" id="chatInput" placeholder="Ask about a company or stock..." required />
                             <button type="submit">Send</button>
                         </form>
+                        <select id="modelSelect" style="padding:8px 10px;border-radius:4px;border:1px solid #ccc;">
+                            <option value="llama3">Llama 3</option>
+                            <option value="qwen3">Qwen 3</option>
+                            <option value="gemma3">Gemma 3</option>
+                        </select>
                         <button id="newStockBtn" style="background:#e67e22;color:#fff;padding:10px 16px;border:none;border-radius:4px;cursor:pointer;">New Stock Conversation</button>
                     </div>
                     <div id="chatOutput" style="min-height:80px;"></div>
@@ -111,10 +116,11 @@
             chatHistory.push({role:'user', content:userMsg});
             chatOutput.innerHTML += `<div style='margin:18px 0 8px 0;'><b>You:</b> ${userMsg}</div>`;
             chatInput.value = '';
+            const model = document.getElementById('modelSelect').value;
             const res = await fetch('/chat', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ history: chatHistory })
+                body: JSON.stringify({ history: chatHistory, model })
             });
             const data = await res.json();
             if(data.reply) {

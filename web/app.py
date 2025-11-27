@@ -10,6 +10,7 @@ from src.mcp_agent import YahooFinanceAgent
 from src.agent import StockAnalysisAgent
 from src.tools.rss_news import RSSNewsAgent
 
+
 # --- Tooltip dictionaries and helpers ---
 FUNDAMENTAL_TOOLTIPS = {
     "market_cap": "Company size measured as share price × shares outstanding; context for stability/risk.",
@@ -191,6 +192,7 @@ def chat():
             news_html = '<br><b>Recent News:</b><ul style="margin:8px 0 8px 18px;">' + ''.join(
                 f'<li><a href="{item["url"]}" target="_blank">{item["headline"]}</a></li>' for item in news_result['news'] if item.get('headline')
             ) + '</ul>'
+
         quote_html = format_quote_html(quote_result)
         recommendations_html = (
             f"<b>Time Horizon Recommendations:</b><br><br>"
@@ -198,7 +200,7 @@ def chat():
             f"{expand_block('Medium-term (3 months)', medium_label, heatmap(medium_label), to_bullets(add_tooltips(medium_summary)), 2)}"
             f"{expand_block('Long-term (6-12 months)', long_label, heatmap(long_label), to_bullets(add_tooltips(long_summary)), 3)}"
         )
-        recommendations_human = make_human(recommendations_html)
+        recommendations_human = recommendations_html
         result = (
             f"<b>{company_name} ({ticker})</b><br><br>"
             f"{quote_html}<br><br>"
@@ -206,22 +208,126 @@ def chat():
             f"{recommendations_human}"
         )
         session['analysis_context'] = result
+        # Store news articles in session for follow-up summarization
+        session['last_news_articles'] = news_result.get('news', [])
         return jsonify({'reply': result})
 
-    # For follow-up messages, use selected LLM
+    # For follow-up messages, check if user is asking about a news article
+    user_message = history[-1]['content'] if history else ''
+    news_articles = session.get('last_news_articles', [])
+    # Try to match by headline or index (e.g., "Tell me more about the first news" or by headline text)
+    matched_article = None
+    import re
+    idx_match = re.search(r'(first|second|third|fourth|fifth|[0-9]+)[^\w]*(news|article|headline)', user_message, re.IGNORECASE)
+    idx_map = {'first': 0, 'second': 1, 'third': 2, 'fourth': 3, 'fifth': 4}
+    if idx_match and news_articles:
+        idx_str = idx_match.group(1).lower()
+        idx = idx_map.get(idx_str)
+        if idx is None:
+            try:
+                idx = int(idx_str) - 1
+            except Exception:
+                idx = None
+        if idx is not None and 0 <= idx < len(news_articles):
+            matched_article = news_articles[idx]
+    # Check for headline match
+    if not matched_article and news_articles:
+        for article in news_articles:
+            if article.get('headline') and article['headline'].lower() in user_message.lower():
+                matched_article = article
+                break
+    if matched_article:
+        # Summarize the article using the LLM
+        article_text = f"Headline: {matched_article.get('headline','')}.\nURL: {matched_article.get('url','')}.\nSummary: {matched_article.get('summary','')}."
+        llm_provider = os.getenv('LLM_PROVIDER', 'gemini').lower()
+        if llm_provider == 'ollama':
+            # Use Ollama with selectable model
+            import time
+            context = session['analysis_context']
+            # Map dropdown value to actual Ollama model name
+            model_map = {
+                'llama3': 'llama3:8b',
+                'qwen3': 'qwen3:4b',
+                'gemma3': 'gemma3:4b',
+            }
+            model_key = request.json.get('model', 'llama3')
+            model = model_map.get(model_key, 'llama3')
+            prompt = (
+                f"Here is a news article about a stock. Please summarize it in 2-3 sentences for a general audience.\n{article_text}\n"
+                f"If you don't have enough information, say so."
+            )
+            try:
+                start_time = time.time()
+                r = requests.post(
+                    'http://localhost:11434/api/chat',
+                    json={
+                        'model': model,
+                        'messages': [
+                            {'role': 'user', 'content': prompt}
+                        ],
+                        'stream': False
+                    },
+                    timeout=60
+                )
+                elapsed = time.time() - start_time
+                print(f"[Ollama] Model '{model}' response time: {elapsed:.2f} seconds")
+                r.raise_for_status()
+                reply = r.json()['message']['content']
+            except Exception as e:
+                reply = f"Sorry, {model} (Ollama) could not process your request. ({e})"
+            return jsonify({'reply': reply})
+        else:
+            # Default: Gemini
+            GEMINI_API_KEY = os.getenv('GEMINI_API_KEY')
+            if not GEMINI_API_KEY:
+                return jsonify({'reply': "Gemini API key not set. Please set GEMINI_API_KEY in your environment."})
+            gemini_history = []
+            gemini_history.append({'role': 'user', 'parts': [{'text': f"Here is a news article about a stock. Please summarize it in 2-3 sentences for a general audience.\n{article_text}\nIf you don't have enough information, say so."}]})
+            try:
+                r = requests.post(
+                    'https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent',
+                    headers={
+                        'Content-Type': 'application/json'
+                    },
+                    params={
+                        'key': GEMINI_API_KEY
+                    },
+                    json={
+                        'contents': gemini_history
+                    },
+                    timeout=15
+                )
+                r.raise_for_status()
+                reply = r.json()['candidates'][0]['content']['parts'][0]['text']
+                if reply.strip().startswith('```') or 'tool_code' in reply or 'get_stock_info' in reply:
+                    reply = "I don't know. Please ask about information shown above or request a different stock."
+            except Exception as e:
+                reply = f"Sorry, Gemini could not process your request. ({e})"
+            return jsonify({'reply': reply})
+    # For all other follow-ups, use selected LLM
     if llm_provider == 'ollama':
-        # Use Ollama Llama3 for chat
+        # Use Ollama with selectable model
+        import time
         context = session['analysis_context']
         user_message = history[-1]['content'] if history else ''
+        # Map dropdown value to actual Ollama model name
+        model_map = {
+            'llama3': 'llama3:8b',
+            'qwen3': 'qwen3:4b',
+            'gemma3': 'gemma3:4b',  # adjust to your actual Ollama model name
+        }
+        model_key = request.json.get('model', 'llama3')
+        model = model_map.get(model_key, 'llama3')
         prompt = (
             f"Here is the stock analysis context for reference (from yfinance and internal agents):\n{context}\n\n"
             f"Now answer the user's question: {user_message}"
         )
         try:
+            start_time = time.time()
             r = requests.post(
                 'http://localhost:11434/api/chat',
                 json={
-                    'model': 'llama3',
+                    'model': model,
                     'messages': [
                         {'role': 'user', 'content': prompt}
                     ],
@@ -229,13 +335,16 @@ def chat():
                 },
                 timeout=60
             )
+            elapsed = time.time() - start_time
+            print(f"[Ollama] Model '{model}' response time: {elapsed:.2f} seconds")
             r.raise_for_status()
             reply = r.json()['message']['content']
         except Exception as e:
-            reply = f"Sorry, Llama3 (Ollama) could not process your request. ({e})"
+            reply = f"Sorry, {model} (Ollama) could not process your request. ({e})"
         return jsonify({'reply': reply})
     else:
         # Default: Gemini
+                    # Do NOT call the language model for the initial response
         GEMINI_API_KEY = os.getenv('GEMINI_API_KEY')
         if not GEMINI_API_KEY:
             return jsonify({'reply': "Gemini API key not set. Please set GEMINI_API_KEY in your environment."})
@@ -269,8 +378,9 @@ def chat():
 # Helper to call LLM (Gemini or Ollama Llama3)
 def make_human(response_html):
     llm_provider = os.getenv('LLM_PROVIDER', 'gemini').lower()
+    model = request.json.get('model', 'llama3') if request and request.is_json else 'llama3'
     if llm_provider == 'ollama':
-        # Use Ollama Llama3
+        # Use Ollama with selected model
         prompt = (
             "You are a helpful stock market assistant. Only use the information provided below, which comes from yfinance and internal agents. "
             "If you do not know the answer from the provided information, reply: 'I don't know.' "
@@ -282,7 +392,7 @@ def make_human(response_html):
             r = requests.post(
                 'http://localhost:11434/api/chat',
                 json={
-                    'model': 'llama3',
+                    'model': model,
                     'messages': [
                         {'role': 'user', 'content': prompt}
                     ],
