@@ -10,6 +10,12 @@ from src.mcp_agent import YahooFinanceAgent
 from src.agent import StockAnalysisAgent
 from src.tools.rss_news import RSSNewsAgent
 
+# For fetching full article text
+from src.tools.article_scraper import fetch_article_text
+
+# For web search fallback
+from src.tools.web_search import ddg_search
+
 
 # --- Tooltip dictionaries and helpers ---
 FUNDAMENTAL_TOOLTIPS = {
@@ -153,8 +159,99 @@ def analyze():
 
 @app.route('/chat', methods=['POST'])
 def chat():
+    global yahoo_agent
     data = request.get_json()
     history = data.get('history', [])
+    user_message = history[-1]['content'] if history else ''
+
+    # Detect if user is asking about earnings
+    if 'earnings' in user_message.lower() or 'earnings report' in user_message.lower():
+        import re as _re
+        ticker = None
+        context = session.get('analysis_context', '')
+        m = _re.search(r'\(([^)]+)\)', context)
+        if m:
+            ticker = m.group(1)
+        if not ticker and history:
+            for h in reversed(history):
+                t = h.get('content','')
+                m2 = _re.search(r'\(([^)]+)\)', t)
+                if m2:
+                    ticker = m2.group(1)
+                    break
+        if ticker:
+            earnings_result = yahoo_agent.handle({"action": "get_earnings", "parameters": {"ticker": ticker}})
+            if earnings_result.get('status') == 'ok':
+                data = earnings_result['data']
+                next_earnings = data.get('next_earnings')
+                earnings_history = data.get('earnings_history', [])
+                html = f"<b>Earnings for {ticker}:</b><br>"
+                if next_earnings:
+                    html += "<b>Next Earnings Event:</b><ul>"
+                    for k, v in next_earnings.items():
+                        html += f"<li><b>{k}:</b> {v}</li>"
+                    html += "</ul>"
+                if earnings_history:
+                    # Always show date as first column, even if named differently
+                    date_keys = ['Earnings Date', 'index', 'date']
+                    columns = list(earnings_history[0].keys())
+                    date_col = next((k for k in date_keys if k in columns), columns[0])
+                    # Move date_col to front
+                    columns = [date_col] + [c for c in columns if c != date_col]
+                    html += "<b>Recent Earnings History:</b><table border='1' cellpadding='4' style='border-collapse:collapse;margin-top:6px;'><tr>"
+                    for col in columns:
+                        html += f"<th>{col}</th>"
+                    html += "</tr>"
+                    for e in earnings_history[:5]:
+                        html += "<tr>"
+                        for col in columns:
+                            html += f"<td>{e.get(col, '')}</td>"
+                        html += "</tr>"
+                    html += "</table>"
+                if not next_earnings and not earnings_history:
+                    html += "No earnings data found."
+                return jsonify({'reply': html})
+            else:
+                return jsonify({'reply': f"Could not fetch earnings for {ticker}."})
+        else:
+            return jsonify({'reply': "Could not determine ticker for earnings lookup. Please specify the stock symbol."})
+
+    llm_provider = os.getenv('LLM_PROVIDER', 'gemini').lower()
+    if 'analysis_context' not in session:
+        session['analysis_context'] = ''
+    news_articles = session.get('last_news_articles', [])
+    matched_article = None
+    import re
+    idx_match = re.search(r'(first|second|third|fourth|fifth|[0-9]+)[^\w]*(news|article|headline)', user_message, re.IGNORECASE)
+    idx_map = {'first': 0, 'second': 1, 'third': 2, 'fourth': 3, 'fifth': 4}
+    if idx_match and news_articles:
+        idx_str = idx_match.group(1).lower()
+        idx = idx_map.get(idx_str)
+        if idx is None:
+            try:
+                idx = int(idx_str) - 1
+            except Exception:
+                idx = None
+        if idx is not None and 0 <= idx < len(news_articles):
+            matched_article = news_articles[idx]
+    if not matched_article and news_articles:
+        for article in news_articles:
+            if article.get('headline') and article['headline'].lower() in user_message.lower():
+                matched_article = article
+                break
+
+    # Fallback: If not a news or stock context, try web search
+    # Only trigger if not initial stock analysis and not matched_article
+    if len(history) > 1 and not matched_article and not session.get('analysis_context', '').strip():
+        search_results = ddg_search(user_message)
+        if search_results:
+            reply = '<b>Web Search Results:</b><ul>'
+            for r in search_results:
+                reply += f'<li><a href="{r["url"]}" target="_blank">{r["title"]}</a><br><span style="font-size:0.95em;">{r["snippet"]}</span></li>'
+            reply += '</ul>'
+        else:
+            reply = "Sorry, I couldn't find anything relevant on the web."
+        return jsonify({'reply': reply})
 
     llm_provider = os.getenv('LLM_PROVIDER', 'gemini').lower()
 
@@ -237,8 +334,16 @@ def chat():
                 matched_article = article
                 break
     if matched_article:
+        # Fetch full article content
+        article_url = matched_article.get('url', '')
+        article_content = fetch_article_text(article_url) if article_url else ''
         # Summarize the article using the LLM
-        article_text = f"Headline: {matched_article.get('headline','')}.\nURL: {matched_article.get('url','')}.\nSummary: {matched_article.get('summary','')}."
+        article_text = (
+            f"Headline: {matched_article.get('headline','')}\n"
+            f"URL: {article_url}\n"
+            f"Summary: {matched_article.get('summary','')}\n"
+            f"Content: {article_content}"
+        )
         llm_provider = os.getenv('LLM_PROVIDER', 'gemini').lower()
         if llm_provider == 'ollama':
             # Use Ollama with selectable model
