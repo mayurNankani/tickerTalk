@@ -271,13 +271,36 @@ class StockService:
         # Get news
         news_result = self.rss_news_agent.analyze(ticker)
         
+        # Get historical price data for chart (30 days)
+        price_history = self.get_price_history(ticker, period='1mo')
+        
         return {
             'ticker': ticker,
             'company_name': company_name,
             'quote': quote_result,
             'recommendations': recommendations,
-            'news': news_result
+            'news': news_result,
+            'price_history': price_history
         }
+    
+    def get_price_history(self, ticker: str, period: str = '1mo') -> Dict[str, List]:
+        """Fetch historical price data for charting"""
+        import yfinance as yf
+        try:
+            stock = yf.Ticker(ticker)
+            hist = stock.history(period=period)
+            
+            if hist.empty:
+                return {'dates': [], 'prices': []}
+            
+            # Convert to lists for JSON serialization
+            dates = [date.strftime('%Y-%m-%d') for date in hist.index]
+            prices = hist['Close'].round(2).tolist()
+            
+            return {'dates': dates, 'prices': prices}
+        except Exception as e:
+            print(f"Error fetching price history for {ticker}: {e}")
+            return {'dates': [], 'prices': []}
     
     def format_analysis_html(self, analysis: Dict[str, Any]) -> str:
         """Format analysis data as HTML"""
@@ -285,9 +308,30 @@ class StockService:
         ticker = analysis['ticker']
         company_name = analysis['company_name']
         recommendations = analysis['recommendations']
+        price_history = analysis.get('price_history', {'dates': [], 'prices': []})
         
         # Format quote
         quote_html = self.formatter.format_quote(analysis['quote'])
+        
+        # Format price info (only if we have price data)
+        price_table_html = ''
+        if price_history['dates'] and price_history['prices']:
+            # Calculate 30-day change
+            first_price = price_history['prices'][0]
+            last_price = price_history['prices'][-1]
+            overall_change = last_price - first_price
+            overall_change_pct = (overall_change / first_price) * 100
+            change_color = '#10b981' if overall_change >= 0 else '#ef4444'
+            change_symbol = '+' if overall_change >= 0 else ''
+            
+            price_table_html = f'''
+            <div style="margin:15px 0;padding:12px 15px;background:#f9fafb;border-left:3px solid {change_color};border-radius:4px;">
+                <b>30-Day Performance:</b> 
+                <span style="color:{change_color};font-weight:600;">
+                    {change_symbol}{overall_change_pct:.2f}% ({change_symbol}${overall_change:.2f})
+                </span>
+            </div>
+            '''
         
         # Format news
         news_html = self._format_news_html(analysis['news'])
@@ -299,6 +343,7 @@ class StockService:
         return (
             f"<b>{company_name} ({ticker})</b><br>"
             f"{quote_html}<br>"
+            f"{price_table_html}"
             f"{news_html}"
             f"{recommendations_html}"
         )
@@ -370,8 +415,15 @@ stock_service = StockService()
 @app.route('/')
 def index():
     """Serve the main HTML page"""
-    with open(os.path.join(os.path.dirname(__file__), 'index.html')) as f:
-        return f.read()
+    try:
+        html_path = os.path.join(os.path.dirname(__file__), 'index.html')
+        with open(html_path, 'r', encoding='utf-8') as f:
+            content = f.read()
+        from flask import Response
+        return Response(content, mimetype='text/html')
+    except Exception as e:
+        print(f"Error serving index.html: {e}")
+        return f"Error loading page: {e}", 500
 
 
 @app.route('/chat', methods=['POST'])
@@ -473,7 +525,12 @@ def handle_followup_query(user_message: str, model_key: str) -> Dict:
     context = session.get('analysis_context', '')
     prompt = (
         f"Here is the stock analysis context for reference (from yfinance and internal agents):\n{context}\n\n"
-        f"Now answer the user's question: {user_message}"
+        f"Now answer the user's question: {user_message}\n\n"
+        f"IMPORTANT: Format your response with HTML tags for better readability:\n"
+        f"- Use <b>text</b> for bold important terms\n"
+        f"- Use <br> for line breaks\n"
+        f"- Use numbered lists like: 1. <b>Item</b>: Description<br>\n"
+        f"- Keep your response clear and well-formatted with HTML."
     )
     
     if config.LLM_PROVIDER == 'ollama':
