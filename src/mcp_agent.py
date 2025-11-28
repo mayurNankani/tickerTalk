@@ -54,30 +54,30 @@ class YahooFinanceAgent(MCPAgent):
             "earnings_history": earnings_list
         }
 
-        def get_quote(self, ticker: str) -> Dict[str, Any]:
-            stock = yf.Ticker(ticker)
-            info = stock.info
-            return {
-                "symbol": ticker,
-                "price": info.get("regularMarketPrice"),
-                "currency": info.get("currency"),
-                "name": info.get("shortName")
-            }
+    def get_quote(self, ticker: str) -> Dict[str, Any]:
+        stock = yf.Ticker(ticker)
+        info = stock.info
+        return {
+            "symbol": ticker,
+            "price": info.get("regularMarketPrice"),
+            "currency": info.get("currency"),
+            "name": info.get("shortName")
+        }
 
-        def get_news(self, ticker: str) -> Dict[str, Any]:
-            stock = yf.Ticker(ticker)
-            news = []
-            try:
-                news_items = stock.news if hasattr(stock, 'news') else []
-                for item in news_items[:5]:
-                    news.append({
-                        "headline": item.get("title") or item.get("headline"),
-                        "summary": item.get("summary") or item.get("publisher"),
-                        "url": item.get("link") or item.get("url")
-                    })
-            except Exception:
-                pass
-            return {"symbol": ticker, "news": news}
+    def get_news(self, ticker: str) -> Dict[str, Any]:
+        stock = yf.Ticker(ticker)
+        news = []
+        try:
+            news_items = stock.news if hasattr(stock, 'news') else []
+            for item in news_items[:5]:
+                news.append({
+                    "headline": item.get("title") or item.get("headline"),
+                    "summary": item.get("summary") or item.get("publisher"),
+                    "url": item.get("link") or item.get("url")
+                })
+        except Exception:
+            pass
+        return {"symbol": ticker, "news": news}
 
 # Example: NewsAgent
 class NewsAgent(MCPAgent):
