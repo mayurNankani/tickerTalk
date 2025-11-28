@@ -253,8 +253,15 @@ class StockService:
     
     def search_company(self, company_name: str) -> Optional[Dict[str, Any]]:
         """Search for company and return best match"""
-        search_results = self.company_search.analyze(company_name)
-        matches = search_results.get('matches', [])
+        search_result = self.company_search.analyze(company_name)
+        
+        # Handle ToolResult return type
+        if hasattr(search_result, 'data'):
+            matches = search_result.data.get('matches', []) if search_result.data else []
+        else:
+            # Backward compatibility
+            matches = search_result.get('matches', [])
+        
         return matches[0] if matches else None
     
     def get_stock_analysis(self, ticker: str, company_name: str) -> Dict[str, Any]:
@@ -268,8 +275,12 @@ class StockService:
         # Get recommendations
         recommendations = self.analysis_agent.get_recommendation(ticker)
         
-        # Get news
-        news_result = self.rss_news_agent.analyze(ticker)
+        # Get news (handle ToolResult return type)
+        news_result_obj = self.rss_news_agent.analyze(ticker)
+        if hasattr(news_result_obj, 'data'):
+            news_result = news_result_obj.data if news_result_obj.data else {'news': []}
+        else:
+            news_result = news_result_obj  # Backward compatibility
         
         # Get historical price data for chart (30 days)
         price_history = self.get_price_history(ticker, period='1mo')
@@ -521,16 +532,36 @@ def handle_news_article_query(article: Dict, model_key: str) -> Dict:
 
 
 def handle_followup_query(user_message: str, model_key: str) -> Dict:
-    """Handle general follow-up questions"""
+    """Handle general follow-up questions, including multi-stock comparisons"""
     context = session.get('analysis_context', '')
+    
+    # Check if user is asking about a different stock
+    additional_stock_data = detect_and_fetch_additional_stocks(user_message, context)
+    
+    # Build enhanced context if we found additional stocks
+    enhanced_context = context
+    instruction_suffix = ""
+    
+    if additional_stock_data:
+        enhanced_context += "\n\n<b>Additional Stock Data (for comparison):</b><br>" + additional_stock_data
+        instruction_suffix = (
+            "\n\nIMPORTANT: I have fetched REAL DATA for the additional stock mentioned in the question. "
+            "This data is shown in the 'Additional Stock Data' section above. "
+            "USE THIS DATA DIRECTLY in your answer - do NOT suggest the user look it up elsewhere. "
+            "Extract the specific metrics requested (PE ratio, price, market cap, etc.) from the data provided "
+            "and present them clearly in your response."
+        )
+    
     prompt = (
-        f"Here is the stock analysis context for reference (from yfinance and internal agents):\n{context}\n\n"
+        f"Here is the stock analysis context for reference (from yfinance and internal agents):\n{enhanced_context}\n\n"
         f"Now answer the user's question: {user_message}\n\n"
         f"IMPORTANT: Format your response with HTML tags for better readability:\n"
         f"- Use <b>text</b> for bold important terms\n"
         f"- Use <br> for line breaks\n"
         f"- Use numbered lists like: 1. <b>Item</b>: Description<br>\n"
-        f"- Keep your response clear and well-formatted with HTML."
+        f"- Keep your response clear and well-formatted with HTML.\n"
+        f"- If comparing multiple stocks, present the comparison clearly with specific numbers."
+        f"{instruction_suffix}"
     )
     
     if config.LLM_PROVIDER == 'ollama':
@@ -590,6 +621,115 @@ def extract_ticker_from_context(context: str, history: List) -> Optional[str]:
             return match.group(1)
     
     return None
+
+
+def detect_and_fetch_additional_stocks(user_message: str, current_context: str) -> str:
+    """
+    Detect if user is asking about a different stock and fetch its data.
+    Returns HTML-formatted data for the additional stock(s).
+    """
+    # Extract current ticker from context
+    current_ticker = None
+    match = re.search(r'\(([A-Z]{1,5})\)', current_context)
+    if match:
+        current_ticker = match.group(1)
+    
+    # Look for potential ticker symbols or company names in the message
+    # Common patterns: "AAPL", "Apple", "compare with MSFT", "what about GOOGL"
+    potential_tickers = []
+    
+    # Pattern 1: Direct ticker symbols (1-5 uppercase letters)
+    ticker_matches = re.findall(r'\b([A-Z]{2,5})\b', user_message)
+    for ticker in ticker_matches:
+        if ticker != current_ticker and ticker not in ['PE', 'EPS', 'ROE', 'ROA']:  # Avoid metric acronyms
+            potential_tickers.append(ticker)
+    
+    # Pattern 2: Company names in various question patterns
+    company_patterns = [
+        r'(?:PE|price.*earnings|P/E).*?(?:ratio|for)\s+([A-Z][a-z]+(?:\s+[A-Z][a-z]+)?)',  # "PE ratio for Apple"
+        r'([A-Z][a-z]+(?:\s+[A-Z][a-z]+)?)(?:\'s|s)?\s+(?:PE|price.*earnings|P/E)',  # "Apple's PE ratio"
+        r'(?:compare (?:with|to|against)|what about|how about)\s+([A-Z][a-z]+(?:\s+[A-Z][a-z]+)*)',
+        r'(?:vs|versus)\s+([A-Z][a-z]+(?:\s+[A-Z][a-z]+)*)',
+        r'(?:get|fetch|show|tell me)\s+.*?(?:for|of)\s+([A-Z][a-z]+(?:\s+[A-Z][a-z]+)?)',  # "get PE for Apple"
+    ]
+    
+    for pattern in company_patterns:
+        company_matches = re.findall(pattern, user_message, re.IGNORECASE)
+        for company_name in company_matches:
+            company_name = company_name.strip()
+            # Try direct ticker first
+            if len(company_name) <= 5 and company_name.upper() == company_name:
+                if company_name.upper() != current_ticker:
+                    potential_tickers.append(company_name.upper())
+            else:
+                # Try to resolve company name to ticker
+                match = stock_service.search_company(company_name)
+                if match:
+                    ticker = match['symbol']
+                    if ticker != current_ticker:
+                        potential_tickers.append(ticker)
+    
+    # Fetch data for additional tickers
+    if not potential_tickers:
+        return ""
+    
+    additional_data_parts = []
+    for ticker in potential_tickers[:3]:  # Limit to 3 additional stocks
+        try:
+            # Get basic quote and info
+            quote_result = stock_service.yahoo_agent.get_quote(ticker)
+            
+            if quote_result.get('status') == 'ok':
+                quote_data = quote_result.get('data', {})
+                
+                # Try to get additional fundamental data using yfinance directly
+                import yfinance as yf
+                stock = yf.Ticker(ticker)
+                info = stock.info
+                
+                # Extract key metrics
+                pe_ratio = info.get('trailingPE', info.get('forwardPE', 'N/A'))
+                market_cap = info.get('marketCap', 'N/A')
+                if market_cap != 'N/A':
+                    market_cap = f"${market_cap / 1e9:.2f}B" if market_cap >= 1e9 else f"${market_cap / 1e6:.2f}M"
+                
+                dividend_yield = info.get('dividendYield', 'N/A')
+                if dividend_yield != 'N/A':
+                    dividend_yield = f"{dividend_yield * 100:.2f}%"
+                
+                eps = info.get('trailingEps', 'N/A')
+                revenue = info.get('totalRevenue', 'N/A')
+                if revenue != 'N/A':
+                    revenue = f"${revenue / 1e9:.2f}B" if revenue >= 1e9 else f"${revenue / 1e6:.2f}M"
+                
+                profit_margin = info.get('profitMargins', 'N/A')
+                if profit_margin != 'N/A':
+                    profit_margin = f"{profit_margin * 100:.2f}%"
+                
+                # Format PE ratio prominently
+                pe_display = f"<b style='font-size:1.1em;color:#2563eb;'>{pe_ratio:.2f}</b>" if isinstance(pe_ratio, (int, float)) else pe_ratio
+                
+                # Format the additional stock data with clear sections
+                stock_html = f"""
+<div style="margin:15px 0;padding:15px;background:#f0f9ff;border-left:4px solid #3b82f6;border-radius:6px;box-shadow:0 2px 4px rgba(0,0,0,0.1);">
+    <div style="font-size:1.1em;margin-bottom:10px;"><b>{info.get('longName', ticker)} ({ticker})</b></div>
+    <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;">
+        <div><b>Current Price:</b> ${quote_data.get('price', 'N/A')} {quote_data.get('currency', '')}</div>
+        <div><b>P/E Ratio:</b> {pe_display}</div>
+        <div><b>Market Cap:</b> {market_cap}</div>
+        <div><b>EPS:</b> {eps if eps != 'N/A' else 'N/A'}</div>
+        <div><b>Revenue:</b> {revenue}</div>
+        <div><b>Profit Margin:</b> {profit_margin}</div>
+        <div><b>Dividend Yield:</b> {dividend_yield}</div>
+    </div>
+</div>
+"""
+                additional_data_parts.append(stock_html)
+        except Exception as e:
+            print(f"Error fetching data for {ticker}: {e}")
+            continue
+    
+    return ''.join(additional_data_parts)
 
 
 def format_earnings_html(ticker: str, data: Dict) -> str:
