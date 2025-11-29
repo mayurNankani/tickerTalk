@@ -767,6 +767,18 @@
             const raw = indexInput.value.trim();
             if (!raw) return;
 
+            // Check if there's an existing session
+            if (state.chatHistory.length > 0) {
+                const confirmSwitch = confirm(
+                    '⚠️ Starting a new session will clear your current conversation.\n\n' +
+                    'Do you want to continue?'
+                );
+                if (!confirmSwitch) {
+                    indexInput.value = '';
+                    return;
+                }
+            }
+
             // parse formats: 'SYMBOL|Friendly' or 'Friendly (SYMBOL)' or just SYMBOL
             let symbol = raw;
             let friendly = raw;
@@ -818,6 +830,11 @@
                     return;
                 }
 
+                // Clear the session and chat history before starting new index query
+                state.chatHistory = [];
+                const messagesEl = document.getElementById('messages');
+                if (messagesEl) messagesEl.innerHTML = '';
+                
                 indexInput.value = '';
                 if (state.isLoading) return;
                 await chat.sendMessage(`index:${symbol}|${friendly}`);
