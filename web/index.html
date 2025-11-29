@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Stock Market Agent</title>
+    <title>TickerTalk</title>
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
@@ -166,7 +166,7 @@
         }
 
         .chat-form {
-            flex: 1;
+            flex: 2;
             display: flex;
             gap: 0.75rem;
         }
@@ -328,11 +328,40 @@
                 font-size: 0.95rem;
             }
         }
+        /* Custom suggestions dropdown for index input */
+        .index-control { position: relative; display: inline-flex; align-items: center; }
+        .index-suggestions {
+            position: absolute;
+            top: calc(100% + 6px);
+            left: 0;
+            width: 100%;
+            background: var(--bg-card);
+            color: var(--text-primary);
+            border: 1px solid var(--border-color);
+            border-radius: 8px;
+            box-shadow: 0 6px 18px rgba(30,50,90,0.08);
+            max-height: 220px;
+            overflow: auto;
+            z-index: 400;
+            display: none;
+        }
+        .index-suggestions .item {
+            padding: 8px 10px;
+            font-size: 0.95rem;
+            border-bottom: 1px solid rgba(0,0,0,0.03);
+            cursor: pointer;
+        }
+        .index-suggestions .item:last-child { border-bottom: none; }
+        .index-suggestions .item:hover { background: #eef2ff; }
+        .index-suggestions.above {
+            top: auto;
+            bottom: calc(100% + 6px);
+        }
     </style>
 </head>
 <body>
     <header>
-        <div class="logo">Stock Market Agent</div>
+        <div class="logo">TickerTalk</div>
     </header>
 
     <main>
@@ -362,6 +391,16 @@
                 <option value="qwen3">Qwen 3</option>
                 <option value="gemma3">Gemma 3</option>
             </select>
+
+            <div style="display:inline-flex;flex-direction:column;align-items:flex-start;margin-left:8px;gap:6px;">
+                <div style="display:inline-flex;align-items:center;gap:6px;">
+                                        <div class="index-control">
+                                            <input id="indexInput" title="Select or type an index symbol (e.g. ^GSPC) or 'SYMBOL|Friendly Name'" placeholder="Select or type index (e.g. ^GSPC)" style="padding:0.55rem 0.7rem;border:1.5px solid var(--border-color);border-radius:8px;background:var(--bg-card);width:190px;font-size:0.95rem;" />
+                                            <div id="indexSuggestions" class="index-suggestions" aria-hidden="true"></div>
+                                        </div>
+                </div>
+                <div id="indexMsg" style="font-size:0.85rem;color:#d97706;display:none;margin-top:2px;">Invalid symbol or no price data found.</div>
+            </div>
             
             <button type="button" id="resetBtn" class="secondary">Reset</button>
         </div>
@@ -402,12 +441,66 @@
                 const isUser = role === 'user';
                 const label = isUser ? 'You' : 'Agent';
                 const messageClass = isUser ? 'user' : 'agent';
-                
+
+                // If the content contains HTML tags, assume it's already formatted and leave as-is.
+                const containsHtml = /<[^>]+>/.test(content);
+
+                let processed = content;
+                if (!containsHtml && typeof content === 'string') {
+                    // Normalize Windows line endings
+                    processed = processed.replace(/\r\n/g, '\n');
+
+                    // Convert unordered list markers (- or *) at line starts into <ul>
+                    const lines = processed.split('\n');
+                    let i = 0;
+                    const out = [];
+                    while (i < lines.length) {
+                        const line = lines[i].trim();
+                        // Ordered list (e.g., "1. item")
+                        if (/^\d+\.\s+/.test(line)) {
+                            out.push('<ol>');
+                            while (i < lines.length && /^\s*\d+\.\s+/.test(lines[i])) {
+                                const itemText = lines[i].replace(/^\s*\d+\.\s+/, '').trim();
+                                out.push(`<li>${itemText}</li>`);
+                                i++;
+                            }
+                            out.push('</ol>');
+                            continue;
+                        }
+
+                        // Unordered list
+                        if (/^[\-*+]\s+/.test(line)) {
+                            out.push('<ul>');
+                            while (i < lines.length && /^[\s\-*+]+\s+/.test(lines[i])) {
+                                const itemText = lines[i].replace(/^[\s\-*+]+\s+/, '').trim();
+                                out.push(`<li>${itemText}</li>`);
+                                i++;
+                            }
+                            out.push('</ul>');
+                            continue;
+                        }
+
+                        // Normal paragraph line: convert single newlines to <br>
+                        if (line === '') {
+                            out.push('<br>');
+                        } else {
+                            out.push(line);
+                        }
+
+                        i++;
+                    }
+
+                    // Join with spaces but preserve explicit <br> and list markup
+                    processed = out.join('\n');
+                    // Finally, replace remaining newlines between text blocks with <br>
+                    processed = processed.replace(/\n+/g, '<br>');
+                }
+
                 return `
                     <div class="message">
                         <div class="message-label">${label}</div>
                         <div class="message-content ${messageClass}">
-                            ${content}
+                            ${processed}
                         </div>
                     </div>
                 `;
@@ -513,17 +606,150 @@
         // ===================================================================
         // Event Listeners
         // ===================================================================
+        // Parse index-like strings into symbol/friendly
+        function parseIndexRaw(raw) {
+            const r = (raw || '').trim();
+            if (!r) return null;
+            let symbol = r;
+            let friendly = r;
+
+            if (r.toLowerCase().startsWith('index:')) {
+                const payload = r.slice(6).trim();
+                return parseIndexRaw(payload);
+            }
+
+            if (r.includes('|')) {
+                const parts = r.split('|').map(s => s.trim()).filter(Boolean);
+                if (parts.length >= 2) {
+                    if (parts[0].startsWith('^') || /^[A-Z0-9\.]{1,6}$/.test(parts[0])) {
+                        symbol = parts[0]; friendly = parts[1];
+                    } else {
+                        symbol = parts[1]; friendly = parts[0];
+                    }
+                    return { symbol, friendly };
+                }
+            }
+
+            // Friendly (SYMBOL)
+            const m = r.match(/\(([^)]+)\)/);
+            if (m) {
+                const inner = m[1].trim();
+                if (inner.startsWith('^') || /^[A-Z0-9\.]{1,6}$/.test(inner)) {
+                    symbol = inner;
+                    friendly = r.replace(/\s*\([^)]+\)/, '').trim();
+                    return { symbol, friendly };
+                }
+            }
+
+            const m2 = r.match(/(\^[A-Z0-9\.]+)/);
+            if (m2) {
+                symbol = m2[1];
+                friendly = r.replace(m2[0], '').trim() || symbol;
+                return { symbol, friendly };
+            }
+
+            if (/^\^[A-Z0-9\.]{1,6}$/.test(r)) {
+                return { symbol: r, friendly: r };
+            }
+
+            // Fuzzy friendly-name matching against known suggestions (e.g. "S&P 500")
+            try {
+                if (typeof INDEX_SUGGESTIONS !== 'undefined' && Array.isArray(INDEX_SUGGESTIONS)) {
+                    const q = r.toLowerCase();
+                    // prefer exact friendly match first
+                    for (const it of INDEX_SUGGESTIONS) {
+                        const parts = it.split('|');
+                        const sym = (parts[0] || '').trim();
+                        const friendlyName = (parts[1] || '').trim();
+                        if (!friendlyName) continue;
+                        if (friendlyName.toLowerCase() === q) {
+                            return { symbol: sym, friendly: friendlyName };
+                        }
+                    }
+                    // then substring match in friendly name
+                    for (const it of INDEX_SUGGESTIONS) {
+                        const parts = it.split('|');
+                        const sym = (parts[0] || '').trim();
+                        const friendlyName = (parts[1] || '').trim();
+                        if (!friendlyName) continue;
+                        if (friendlyName.toLowerCase().includes(q)) {
+                            return { symbol: sym, friendly: friendlyName };
+                        }
+                    }
+                    // fallback: symbol match
+                    for (const it of INDEX_SUGGESTIONS) {
+                        const parts = it.split('|');
+                        const sym = (parts[0] || '').trim();
+                        if (sym.toLowerCase() === q || sym.toLowerCase() === ('^' + q)) {
+                            return { symbol: sym, friendly: sym };
+                        }
+                    }
+                }
+            } catch (e) {
+                // ignore matching errors
+            }
+
+            return null;
+        }
+
+        async function validateAndSendIndex(symbol, friendly) {
+            if (!symbol) return false;
+            if (indexMsg) indexMsg.style.display = 'none';
+            try {
+                if (indexLoadBtn) indexLoadBtn.disabled = true;
+                elements.chatInput.disabled = true;
+
+                const resp = await fetch(`/api/price-history?ticker=${encodeURIComponent(symbol)}&period=1d`);
+                if (!resp.ok) throw new Error('network');
+                const data = await resp.json();
+                const hasData = data && Array.isArray(data.dates) && data.dates.length > 0 && Array.isArray(data.prices) && data.prices.length > 0;
+                if (!hasData) {
+                    if (indexMsg) {
+                        indexMsg.textContent = 'No intraday price data found for that symbol. Try the Yahoo-style index symbol (e.g. ^GSPC).';
+                        indexMsg.style.display = 'block';
+                    }
+                    return false;
+                }
+
+                if (state.isLoading) return false;
+                await chat.sendMessage(`index:${symbol}|${friendly}`);
+                return true;
+            } catch (err) {
+                if (indexMsg) {
+                    indexMsg.textContent = 'Could not validate symbol (network or invalid). Try ^GSPC or a known Yahoo symbol.';
+                    indexMsg.style.display = 'block';
+                }
+                return false;
+            } finally {
+                if (indexLoadBtn) indexLoadBtn.disabled = false;
+                elements.chatInput.disabled = false;
+            }
+        }
+
         elements.chatForm.addEventListener('submit', async (e) => {
             e.preventDefault();
-            
-            const userMessage = elements.chatInput.value.trim();
-            if (!userMessage || state.isLoading) return;
-            
+
+            const rawMessage = elements.chatInput.value.trim();
+            if (!rawMessage || state.isLoading) return;
+
+            // If the user explicitly prefixes with 'index:' or includes '^', treat as index search
+            const isIndexPrefix = rawMessage.toLowerCase().startsWith('index:');
+            const hasCaret = rawMessage.indexOf('^') !== -1;
+
             // Clear input immediately
             elements.chatInput.value = '';
-            
-            // Send message
-            await chat.sendMessage(userMessage);
+
+            if (isIndexPrefix || hasCaret) {
+                const parsed = parseIndexRaw(rawMessage);
+                if (parsed) {
+                    const ok = await validateAndSendIndex(parsed.symbol, parsed.friendly);
+                    if (ok) return; // handled
+                }
+                // If parsing/validation failed, fall through and show original as a normal chat message
+            }
+
+            // Send regular company/chat message
+            await chat.sendMessage(rawMessage);
         });
 
         elements.resetBtn.addEventListener('click', () => {
@@ -531,10 +757,219 @@
             chat.reset();
         });
 
+        // Index input (select-or-type) handling and validation
+        const indexInput = document.getElementById('indexInput');
+        const indexLoadBtn = document.getElementById('indexLoadBtn');
+        const indexMsg = document.getElementById('indexMsg');
+
+        const sendIndexFromInput = async () => {
+            if (!indexInput) return;
+            const raw = indexInput.value.trim();
+            if (!raw) return;
+
+            // parse formats: 'SYMBOL|Friendly' or 'Friendly (SYMBOL)' or just SYMBOL
+            let symbol = raw;
+            let friendly = raw;
+
+            if (raw.includes('|')) {
+                const parts = raw.split('|').map(s => s.trim()).filter(Boolean);
+                if (parts.length >= 2) {
+                    if (parts[0].startsWith('^') || /^[A-Z0-9\.]{1,6}$/.test(parts[0])) {
+                        symbol = parts[0]; friendly = parts[1];
+                    } else {
+                        symbol = parts[1]; friendly = parts[0];
+                    }
+                }
+            } else {
+                // Friendly (SYMBOL)
+                const m = raw.match(/\(([^)]+)\)/);
+                if (m) {
+                    const inner = m[1].trim();
+                    if (inner.startsWith('^') || /^[A-Z0-9\.]{1,6}$/.test(inner)) {
+                        symbol = inner;
+                        friendly = raw.replace(/\s*\([^)]+\)/, '').trim();
+                    }
+                } else {
+                    const m2 = raw.match(/(\^[A-Z0-9\.]+)/);
+                    if (m2) {
+                        symbol = m2[1];
+                        friendly = raw.replace(m2[0], '').trim() || symbol;
+                    } else if (/^[A-Z0-9\.]{1,6}$/.test(raw)) {
+                        symbol = raw; friendly = raw;
+                    }
+                }
+            }
+
+            if (indexMsg) { indexMsg.style.display = 'none'; }
+
+                try {
+                if (indexLoadBtn) indexLoadBtn.disabled = true;
+                indexInput.disabled = true;
+
+                const resp = await fetch(`/api/price-history?ticker=${encodeURIComponent(symbol)}&period=1d`);
+                if (!resp.ok) throw new Error('network');
+                const data = await resp.json();
+                const hasData = data && Array.isArray(data.dates) && data.dates.length > 0 && Array.isArray(data.prices) && data.prices.length > 0;
+                if (!hasData) {
+                    if (indexMsg) {
+                        indexMsg.textContent = 'No intraday price data found for that symbol. Try the Yahoo-style index symbol (e.g. ^GSPC).';
+                        indexMsg.style.display = 'block';
+                    }
+                    return;
+                }
+
+                indexInput.value = '';
+                if (state.isLoading) return;
+                await chat.sendMessage(`index:${symbol}|${friendly}`);
+            } catch (err) {
+                if (indexMsg) {
+                    indexMsg.textContent = 'Could not validate symbol (network or invalid). Try ^GSPC or a known Yahoo symbol.';
+                    indexMsg.style.display = 'block';
+                }
+            } finally {
+                if (indexLoadBtn) indexLoadBtn.disabled = false;
+                indexInput.disabled = false;
+            }
+        };
+
+        if (indexLoadBtn) indexLoadBtn.addEventListener('click', async () => { await sendIndexFromInput(); });
+
+        // ------------------
+        // Index suggestions
+        // ------------------
+        const idxSuggestionsEl = document.getElementById('indexSuggestions');
+        const INDEX_SUGGESTIONS = [
+            '^GSPC|S&P 500',
+            '^IXIC|Nasdaq Composite',
+            '^DJI|Dow Jones',
+            '^RUT|Russell 2000',
+            '^FTSE|FTSE 100',
+            '^N225|Nikkei 225',
+            '^HSI|Hang Seng',
+            '^KS11|KOSPI',
+            '^SSEC|Shanghai Composite',
+            '^BVSP|Bovespa',
+            '^AORD|ASX 200',
+            '^GSPTSE|TSX'
+        ];
+
+        let _filtered = [];
+        let _selected = -1;
+
+        function renderIndexSuggestions(items) {
+            idxSuggestionsEl.innerHTML = '';
+            if (!items || items.length === 0) {
+                idxSuggestionsEl.style.display = 'none';
+                idxSuggestionsEl.setAttribute('aria-hidden', 'true');
+                return;
+            }
+            items.forEach((val, idx) => {
+                const row = document.createElement('div');
+                row.className = 'item';
+                row.setAttribute('data-value', val);
+                const parts = val.split('|');
+                const symbol = parts[0] || val;
+                const friendly = parts[1] || '';
+                row.innerHTML = `<strong style="margin-right:8px;color:var(--primary-blue);">${symbol}</strong><span style="color:var(--text-secondary);">${friendly}</span>`;
+                row.addEventListener('click', () => {
+                    indexInput.value = val;
+                    hideIndexSuggestions();
+                    sendIndexFromInput();
+                });
+                idxSuggestionsEl.appendChild(row);
+            });
+            _selected = -1;
+            // show and size
+            idxSuggestionsEl.style.display = 'block';
+            idxSuggestionsEl.setAttribute('aria-hidden', 'false');
+
+            // compute desired height: prefer content height but cap to 220px
+            const firstChild = idxSuggestionsEl.querySelector('.item');
+            const itemH = firstChild ? Math.max(32, firstChild.offsetHeight) : 36;
+            const desired = Math.min(220, items.length * itemH + 4);
+            idxSuggestionsEl.style.maxHeight = desired + 'px';
+
+            // If the input is near the bottom of the viewport, open above instead
+            try {
+                const rect = indexInput.getBoundingClientRect();
+                const spaceBelow = window.innerHeight - rect.bottom;
+                const spaceAbove = rect.top;
+                if (spaceBelow < desired && spaceAbove > spaceBelow) {
+                    idxSuggestionsEl.classList.add('above');
+                } else {
+                    idxSuggestionsEl.classList.remove('above');
+                }
+            } catch (e) {
+                // ignore
+                idxSuggestionsEl.classList.remove('above');
+            }
+        }
+
+        function hideIndexSuggestions() {
+            idxSuggestionsEl.style.display = 'none';
+            idxSuggestionsEl.setAttribute('aria-hidden', 'true');
+            _selected = -1;
+        }
+
+        function filterIndexSuggestions(q) {
+            if (!q) return INDEX_SUGGESTIONS.slice();
+            const lower = q.toLowerCase();
+            return INDEX_SUGGESTIONS.filter(it => it.toLowerCase().includes(lower) || it.toLowerCase().startsWith(lower));
+        }
+
+        if (indexInput) {
+            indexInput.addEventListener('input', (e) => {
+                _filtered = filterIndexSuggestions(e.target.value.trim());
+                renderIndexSuggestions(_filtered);
+            });
+
+            indexInput.addEventListener('keydown', (e) => {
+                const items = idxSuggestionsEl.querySelectorAll('.item');
+                if (e.key === 'ArrowDown') {
+                    e.preventDefault();
+                    if (items.length === 0) return;
+                    _selected = Math.min(_selected + 1, items.length - 1);
+                    items.forEach((it, i) => it.style.background = i === _selected ? '#eef2ff' : '');
+                    if (items[_selected]) items[_selected].scrollIntoView({block: 'nearest'});
+                } else if (e.key === 'ArrowUp') {
+                    e.preventDefault();
+                    if (items.length === 0) return;
+                    _selected = Math.max(_selected - 1, 0);
+                    items.forEach((it, i) => it.style.background = i === _selected ? '#eef2ff' : '');
+                    if (items[_selected]) items[_selected].scrollIntoView({block: 'nearest'});
+                } else if (e.key === 'Enter') {
+                    e.preventDefault();
+                    if (_selected >= 0 && items[_selected]) {
+                        indexInput.value = items[_selected].getAttribute('data-value');
+                        hideIndexSuggestions();
+                        sendIndexFromInput();
+                    } else {
+                        hideIndexSuggestions();
+                        sendIndexFromInput();
+                    }
+                } else if (e.key === 'Escape') {
+                    hideIndexSuggestions();
+                }
+            });
+
+            indexInput.addEventListener('focus', () => {
+                _filtered = filterIndexSuggestions(indexInput.value.trim());
+                renderIndexSuggestions(_filtered);
+            });
+
+            document.addEventListener('click', (ev) => {
+                if (!ev.target.closest || !ev.target.closest('.index-control')) {
+                    hideIndexSuggestions();
+                }
+            });
+        }
+
         // Focus input on page load
         window.addEventListener('load', () => {
             elements.chatInput.focus();
         });
+
+        
 
         // Keyboard shortcuts
         document.addEventListener('keydown', (e) => {
@@ -543,6 +978,183 @@
                 chat.reset();
             }
         });
+
+        // ===================================================================
+        // Chart handling (delegated)
+        // ===================================================================
+        const chartInstances = new Map();
+
+        document.addEventListener('click', async (e) => {
+            const toggleBtn = e.target.closest && e.target.closest('.toggle-chart-btn');
+            if (toggleBtn) {
+                const chartId = toggleBtn.getAttribute('data-chart-id');
+                const ticker = toggleBtn.getAttribute('data-ticker');
+                const chartDiv = document.getElementById(chartId);
+                const btnText = document.getElementById('btn_' + chartId);
+
+                if (!chartDiv) return;
+
+                const isHidden = chartDiv.style.display === 'none' || chartDiv.style.display === '';
+                if (isHidden) {
+                    chartDiv.style.display = 'block';
+                    if (btnText) btnText.textContent = 'Hide Chart ▲';
+                    // Load default period if not loaded
+                    if (!chartInstances.has(chartId)) {
+                        // find the default active period button
+                        const defaultBtn = chartDiv.querySelector('.period-btn.active') || chartDiv.querySelector('.period-btn[data-period="1mo"]');
+                        const period = defaultBtn ? defaultBtn.getAttribute('data-period') : '1mo';
+                        await loadChartData(chartId, ticker, period, defaultBtn);
+                    }
+                } else {
+                    chartDiv.style.display = 'none';
+                    if (btnText) btnText.textContent = 'Show Chart ▼';
+                }
+
+                return;
+            }
+
+            const periodBtn = e.target.closest && e.target.closest('.period-btn');
+            if (periodBtn) {
+                const period = periodBtn.getAttribute('data-period');
+                const ticker = periodBtn.getAttribute('data-ticker');
+                const chartId = periodBtn.getAttribute('data-chart-id');
+                await loadChartData(chartId, ticker, period, periodBtn);
+                return;
+            }
+        });
+
+        async function loadChartData(chartId, ticker, period, triggeringBtn = null) {
+            try {
+                const loading = document.getElementById('loading_' + chartId);
+                const canvas = document.getElementById('canvas_' + chartId);
+                if (loading) loading.style.display = 'block';
+                if (canvas) canvas.style.display = 'none';
+
+                const resp = await fetch(`/api/price-history?ticker=${encodeURIComponent(ticker)}&period=${encodeURIComponent(period)}`);
+                const data = await resp.json();
+
+                if (data && data.dates && data.prices) {
+                    renderChart(chartId, data.dates, data.prices, period);
+
+                    // update active button styles
+                    const parent = document.getElementById(chartId);
+                    if (parent) {
+                        parent.querySelectorAll('.period-btn').forEach(btn => {
+                            btn.style.background = '#e5e7eb';
+                            btn.style.color = '#000';
+                            btn.style.borderColor = '#d1d5db';
+                            btn.classList.remove('active');
+                        });
+                        if (triggeringBtn) {
+                            triggeringBtn.style.background = '#3b82f6';
+                            triggeringBtn.style.color = 'white';
+                            triggeringBtn.style.borderColor = '#3b82f6';
+                            triggeringBtn.classList.add('active');
+                        }
+                    }
+                }
+            } catch (err) {
+                console.error('Error loading chart data:', err);
+            } finally {
+                const loading = document.getElementById('loading_' + chartId);
+                const canvas = document.getElementById('canvas_' + chartId);
+                if (loading) loading.style.display = 'none';
+                if (canvas) canvas.style.display = 'block';
+            }
+        }
+
+        function renderChart(chartId, dates, prices, period) {
+            try {
+                const canvasEl = document.getElementById('canvas_' + chartId);
+                if (!canvasEl) return;
+
+                const ctx = canvasEl.getContext('2d');
+
+                if (chartInstances.has(chartId)) {
+                    const inst = chartInstances.get(chartId);
+                    try { inst.destroy(); } catch (e) { /* ignore */ }
+                    chartInstances.delete(chartId);
+                }
+
+                // Enforce fixed pixel height on the canvas and its container to avoid
+                // Chart.js responsive growth when re-rendering repeatedly.
+                const container = document.getElementById(chartId);
+                if (container) {
+                    container.style.height = '270px'; // includes some padding for controls
+                }
+
+                // Ensure the canvas has a fixed drawing height
+                canvasEl.style.height = '250px';
+                canvasEl.style.maxHeight = '250px';
+                canvasEl.height = 250;
+
+                const color = prices[prices.length - 1] >= prices[0] ? '#10b981' : '#ef4444';
+
+                const newChart = new Chart(ctx, {
+                    type: 'line',
+                    data: {
+                        labels: dates,
+                        datasets: [{
+                            label: '',
+                            data: prices,
+                            borderColor: color,
+                            backgroundColor: color + '20',
+                            borderWidth: 2,
+                            fill: true,
+                            tension: 0.4,
+                            pointRadius: period === '1d' ? 2 : 0,
+                            pointHoverRadius: 5
+                        }]
+                    },
+                    options: {
+                        responsive: true,
+                        maintainAspectRatio: false,
+                        plugins: {
+                            legend: { display: false },
+                            tooltip: {
+                                mode: 'index',
+                                intersect: false,
+                                callbacks: {
+                                    label: (context) => '$' + context.parsed.y.toFixed(2)
+                                }
+                            }
+                        },
+                        scales: {
+                            y: {
+                                beginAtZero: false,
+                                ticks: {
+                                    callback: (value) => '$' + value.toFixed(2)
+                                }
+                            },
+                            x: {
+                                ticks: {
+                                    maxRotation: 45,
+                                    minRotation: 45,
+                                    maxTicksLimit: period === '1d' ? 10 : (period === '5d' ? 5 : 8),
+                                    // Strip time portion from x-axis labels (show date only)
+                                    callback: function(value) {
+                                        // value is the tick value (string label)
+                                        if (typeof value === 'string' && value.indexOf(' ') !== -1) {
+                                            return value.split(' ')[0];
+                                        }
+                                        return value;
+                                    }
+                                }
+                            }
+                        },
+                        interaction: {
+                            mode: 'nearest',
+                            axis: 'x',
+                            intersect: false
+                        }
+                    }
+                });
+
+                chartInstances.set(chartId, newChart);
+            } catch (err) {
+                console.error('Error rendering chart:', err);
+            }
+        }
     </script>
 </body>
 </html>

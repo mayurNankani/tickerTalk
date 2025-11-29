@@ -80,6 +80,8 @@ TECHNICAL_TOOLTIPS = {
 }
 
 
+
+
 # ============================================================================
 # HTML Formatting Utilities
 # ============================================================================
@@ -298,16 +300,62 @@ class StockService:
         """Fetch historical price data for charting"""
         import yfinance as yf
         try:
+            # Map requested period to an appropriate intraday interval
+            # Map requested period to an appropriate intraday interval
+            interval_map = {
+                '1d': '5m',   # 1 day -> 5 minute bars
+                '5d': '15m',  # 5 day -> 15 minute bars
+                '1mo': '30m'  # 1 month -> 30 minute bars
+            }
+
+            # Fallback intervals if primary interval returns too few points
+            fallback_map = {
+                '1d': ['5m', '15m', '30m', '60m', None],
+                '5d': ['15m', '30m', '60m', None],
+                '1mo': ['30m', '60m', '1d', None]
+            }
+
+            preferred_list = fallback_map.get(period, [None])
+
             stock = yf.Ticker(ticker)
-            hist = stock.history(period=period)
-            
-            if hist.empty:
+
+            hist = None
+            min_points = 8
+            used_interval = None
+
+            for iv in preferred_list:
+                try:
+                    if iv:
+                        candidate = stock.history(period=period, interval=iv)
+                    else:
+                        candidate = stock.history(period=period)
+
+                    if candidate is None or candidate.empty:
+                        continue
+
+                    # Accept candidate if it has enough points
+                    if len(candidate) >= min_points or iv is None:
+                        hist = candidate
+                        used_interval = iv
+                        break
+                    else:
+                        # keep candidate if it's the best so far but continue trying
+                        if hist is None or len(candidate) > len(hist):
+                            hist = candidate
+                            used_interval = iv
+                        continue
+                except Exception:
+                    continue
+
+            if hist is None or hist.empty:
                 return {'dates': [], 'prices': []}
-            
-            # Convert to lists for JSON serialization
-            dates = [date.strftime('%Y-%m-%d') for date in hist.index]
+
+            # Use datetime formatting for minute-based intervals, date-only for longer intervals
+            fmt = '%Y-%m-%d %H:%M' if used_interval and ('m' in str(used_interval) or 'h' in str(used_interval)) else '%Y-%m-%d'
+
+            dates = [dt.strftime(fmt) for dt in hist.index]
             prices = hist['Close'].round(2).tolist()
-            
+
             return {'dates': dates, 'prices': prices}
         except Exception as e:
             print(f"Error fetching price history for {ticker}: {e}")
@@ -323,6 +371,24 @@ class StockService:
         
         # Format quote
         quote_html = self.formatter.format_quote(analysis['quote'])
+        # Also extract raw price for a dedicated line under the company name
+        price_line_html = ''
+        try:
+            q = analysis.get('quote', {})
+            data = q.get('data', {}) if isinstance(q, dict) else {}
+            price = data.get('price') if data else None
+            currency = data.get('currency') if data else ''
+            if price is not None and price != 'N/A':
+                # ensure numeric formatting when possible
+                try:
+                    price_val = float(price)
+                    price_text = f"${price_val:,.2f}"
+                except Exception:
+                    price_text = str(price)
+
+                price_line_html = f"<div><b>Price:</b> {price_text} {currency}</div>"
+        except Exception:
+            price_line_html = ''
         
         # Format price info (only if we have price data)
         price_table_html = ''
@@ -335,12 +401,32 @@ class StockService:
             change_color = '#10b981' if overall_change >= 0 else '#ef4444'
             change_symbol = '+' if overall_change >= 0 else ''
             
+            # Generate unique ID for this chart
+            chart_id = f"chart_{ticker.replace('.', '_')}_{int(time.time() * 1000)}"
+            
             price_table_html = f'''
             <div style="margin:15px 0;padding:12px 15px;background:#f9fafb;border-left:3px solid {change_color};border-radius:4px;">
-                <b>30-Day Performance:</b> 
-                <span style="color:{change_color};font-weight:600;">
-                    {change_symbol}{overall_change_pct:.2f}% ({change_symbol}${overall_change:.2f})
-                </span>
+                <div style="display:flex;justify-content:space-between;align-items:center;">
+                    <div>
+                        <b>30-Day Performance:</b> 
+                        <span style="color:{change_color};font-weight:600;">
+                            {change_symbol}{overall_change_pct:.2f}% ({change_symbol}${overall_change:.2f})
+                        </span>
+                    </div>
+                    <button class="toggle-chart-btn" data-chart-id="{chart_id}" data-ticker="{ticker}" style="padding:6px 12px;background:#3b82f6;color:white;border:none;border-radius:4px;cursor:pointer;font-size:0.9em;">
+                        <span class="btn-text" id="btn_{chart_id}">Show Chart ▼</span>
+                    </button>
+                </div>
+                
+                <div id="{chart_id}" style="display:none;margin-top:15px;padding-top:15px;border-top:1px solid #e5e7eb;">
+                    <div style="display:flex;gap:8px;margin-bottom:10px;justify-content:center;">
+                        <button class="period-btn" data-period="1d" data-ticker="{ticker}" data-chart-id="{chart_id}" style="padding:6px 14px;background:#e5e7eb;border:1px solid #d1d5db;border-radius:4px;cursor:pointer;font-size:0.85em;">1D</button>
+                        <button class="period-btn" data-period="5d" data-ticker="{ticker}" data-chart-id="{chart_id}" style="padding:6px 14px;background:#e5e7eb;border:1px solid #d1d5db;border-radius:4px;cursor:pointer;font-size:0.85em;">5D</button>
+                        <button class="period-btn active" data-period="1mo" data-ticker="{ticker}" data-chart-id="{chart_id}" style="padding:6px 14px;background:#3b82f6;color:white;border:1px solid #3b82f6;border-radius:4px;cursor:pointer;font-size:0.85em;">1M</button>
+                    </div>
+                    <canvas id="canvas_{chart_id}" style="width:100%;max-width:600px;height:250px;margin:0 auto;display:block;"></canvas>
+                    <div id="loading_{chart_id}" style="text-align:center;padding:20px;color:#666;display:none;">Loading chart...</div>
+                </div>
             </div>
             '''
         
@@ -350,10 +436,23 @@ class StockService:
         # Format recommendations
         recommendations_html = self._format_recommendations_html(recommendations)
         
-        # Combine all sections
+        # Choose a friendly display name: prefer the quote's long/short name if available,
+        # otherwise fall back to the provided company_name.
+        display_name = company_name
+        try:
+            q = analysis.get('quote', {})
+            qdata = q.get('data', {}) if isinstance(q, dict) else {}
+            # Yahoo agent returns 'name' in its get_quote result; other sources may use shortName/longName
+            longname = qdata.get('name') or qdata.get('shortName') or qdata.get('longName')
+            if longname and longname.strip():
+                display_name = longname
+        except Exception:
+            pass
+
+        header_html = f"<b>{display_name}</b>"
         return (
-            f"<b>{company_name} ({ticker})</b><br>"
-            f"{quote_html}<br>"
+            f"{header_html}<br>"
+            f"{price_line_html if price_line_html else quote_html}<br>"
             f"{price_table_html}"
             f"{news_html}"
             f"{recommendations_html}"
@@ -437,6 +536,22 @@ def index():
         return f"Error loading page: {e}", 500
 
 
+@app.route('/api/price-history', methods=['GET'])
+def get_price_history_api():
+    """API endpoint to fetch price history for charts"""
+    ticker = request.args.get('ticker', '')
+    period = request.args.get('period', '1mo')
+    
+    if not ticker:
+        return jsonify({'error': 'Ticker is required'}), 400
+    
+    try:
+        price_data = stock_service.get_price_history(ticker, period)
+        return jsonify(price_data)
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+
 @app.route('/chat', methods=['POST'])
 def chat():
     """Handle chat messages and stock queries"""
@@ -469,14 +584,71 @@ def chat():
 
 def handle_stock_query(company_name: str, model_key: str) -> Dict:
     """Handle initial stock analysis query"""
-    # Search for company
-    match = stock_service.search_company(company_name)
-    if not match:
-        return jsonify({'reply': f"No matching companies found for '{company_name}'."})
+    # Special handling for explicit index requests from the UI
+    # Format expected from client: "index:^GSPC|S&P 500" (symbol|friendly name)
+    if company_name.lower().startswith('index:'):
+        try:
+            payload = company_name.split(':', 1)[1]
+            if '|' in payload:
+                symbol, friendly = payload.split('|', 1)
+            else:
+                symbol, friendly = payload, payload
+
+            match = {'symbol': symbol.strip(), 'long_name': friendly.strip()}
+        except Exception:
+            return jsonify({'reply': 'Invalid index selection.'})
+    else:
+        # First, try to detect a ticker token in the user's input and validate it.
+        # We look for caret-prefixed tokens (e.g. ^GSPC) or ALL-CAPS tokens (e.g. AAPL, QQQ).
+        match = None
+        try:
+            # quick heuristic to extract candidate tokens
+            candidates = re.findall(r"\b[\^A-Za-z0-9\.\-]{1,6}\b", company_name)
+            for token in candidates:
+                token = token.strip()
+                if not token:
+                    continue
+
+                # Accept caret-prefixed tokens as-is, otherwise normalize letter-only tokens
+                if token.startswith('^'):
+                    cand = token
+                else:
+                    # Accept uppercase or lowercase tickers (e.g., qqq or QQQ).
+                    # Normalize to uppercase for validation to avoid missing tickers.
+                    if token.isalpha() or token.isalnum():
+                        cand = token.upper()
+                    else:
+                        # skip things that contain unusual characters
+                        continue
+
+                # Validate candidate ticker via Yahoo agent (quick quote lookup)
+                try:
+                    quote_result = stock_service.yahoo_agent.handle({
+                        "action": "get_quote",
+                        "parameters": {"ticker": cand}
+                    })
+                    if isinstance(quote_result, dict) and quote_result.get('status') == 'ok':
+                        # Accept this ticker
+                        longname = ''
+                        data = quote_result.get('data', {})
+                        longname = data.get('shortName') or data.get('longName') or cand
+                        match = {'symbol': cand, 'long_name': longname}
+                        break
+                except Exception:
+                    # ignore and try next candidate
+                    continue
+        except Exception:
+            match = None
+
+        # If no valid ticker found, fall back to company search
+        if not match:
+            match = stock_service.search_company(company_name)
+            if not match:
+                return jsonify({'reply': f"No matching companies found for '{company_name}'."})
     
     # Get analysis
     ticker = match['symbol']
-    company_full_name = match['long_name'] or match['short_name']
+    company_full_name = match.get('long_name') or match.get('short_name') or company_name
     analysis = stock_service.get_stock_analysis(ticker, company_full_name)
     
     # Format HTML
@@ -534,6 +706,55 @@ def handle_news_article_query(article: Dict, model_key: str) -> Dict:
 def handle_followup_query(user_message: str, model_key: str) -> Dict:
     """Handle general follow-up questions, including multi-stock comparisons"""
     context = session.get('analysis_context', '')
+
+    def _extract_label_for_horizon(ctx: str, horizon: str) -> Optional[str]:
+        """Extract the recommendation label for a given horizon from the HTML context.
+
+        horizon should be one of: 'short', 'medium', 'long'
+        """
+        patterns = {
+            'short': r"<b>Short-term.*?:\s*([^<]+)</b>",
+            'medium': r"<b>Medium-term.*?:\s*([^<]+)</b>",
+            'long': r"<b>Long-term.*?:\s*([^<]+)</b>"
+        }
+        pat = patterns.get(horizon)
+        if not pat:
+            return None
+        m = re.search(pat, ctx, re.IGNORECASE)
+        if m:
+            return m.group(1).strip().upper()
+        return None
+
+    def _detect_horizon_from_message(msg: str) -> str:
+        msg = msg.lower()
+        if 'short' in msg or '1 week' in msg or 'week' in msg:
+            return 'short'
+        if 'medium' in msg or '3 month' in msg or '3 months' in msg:
+            return 'medium'
+        if 'long' in msg or '6 month' in msg or '12 month' in msg:
+            return 'long'
+        # default to short-term if not specified
+        return 'short'
+
+    # Pre-check contradictions: if the user asks about a rating (buy/sell) that
+    # contradicts the stored recommendation, return a clarifying response instead
+    # of sending the inconsistent question to the LLM.
+    try:
+        requested_horizon = _detect_horizon_from_message(user_message)
+        stored_label = _extract_label_for_horizon(context, requested_horizon)
+        if stored_label:
+            # Check if user explicitly asks about 'sell' or 'buy' sentiment
+            wants_sell = bool(re.search(r"\bwhy\b.*\bsell\b|\bwhy is it a sell\b|\bwhy\s+sell\b|\bwhy.*\b(so )?sell\b", user_message, re.IGNORECASE))
+            wants_buy = bool(re.search(r"\bwhy\b.*\bbuy\b|\bwhy is it a buy\b|\bwhy\s+buy\b|\bwhy.*\b(so )?buy\b", user_message, re.IGNORECASE))
+
+            if wants_sell and 'SELL' not in stored_label:
+                return jsonify({'reply': f"The previous analysis rated the {requested_horizon} horizon as '<b>{stored_label}</b>'. I can't explain it as a 'sell' because the stored recommendation is {stored_label}. Would you like me to re-evaluate the stock for the {requested_horizon} horizon?"})
+
+            if wants_buy and ('BUY' not in stored_label and 'STRONG BUY' not in stored_label):
+                return jsonify({'reply': f"The previous analysis rated the {requested_horizon} horizon as '<b>{stored_label}</b>'. I can't explain it as a 'buy' because the stored recommendation is {stored_label}. Would you like me to re-evaluate the stock for the {requested_horizon} horizon?"})
+    except Exception:
+        # On any error in pre-checks, fall through and continue to LLM
+        pass
     
     # Check if user is asking about a different stock
     additional_stock_data = detect_and_fetch_additional_stocks(user_message, context)
