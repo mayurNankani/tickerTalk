@@ -28,17 +28,71 @@ class StockAnalysisService:
         Returns:
             CompanyMatch if found, None otherwise
         """
+        print(f"[DEBUG] find_ticker called with: '{query}'")
+        
         # Try to extract and validate ticker tokens
         ticker_match = self._try_ticker_tokens(query)
         if ticker_match:
+            print(f"[DEBUG] Ticker match found: {ticker_match}")
             return ticker_match
         
         # Fall back to company search
-        return self._search_company(query)
+        print(f"[DEBUG] No ticker match, falling back to company search")
+        company_match = self._search_company(query)
+        print(f"[DEBUG] Company search result: {company_match}")
+        return company_match
     
     def _try_ticker_tokens(self, query: str) -> Optional[CompanyMatch]:
         """Try to find valid ticker in query string"""
         try:
+            def _is_valid_quote(raw_quote: Dict[str, Any]) -> bool:
+                """Determine if a wrapped quote response is genuinely valid."""
+                if not isinstance(raw_quote, dict):
+                    return False
+                data = raw_quote.get('data')  # yahoo_agent.handle wraps result in {'status':'ok','data':{}}
+                if not isinstance(data, dict):
+                    return False
+                # Reject if explicit error field inside data
+                if data.get('error'):
+                    return False
+                # Require a non-null price (regularMarketPrice/currentPrice mapping)
+                price = data.get('price')
+                if price is None:
+                    return False
+                # Basic symbol sanity (1-5 uppercase letters/numbers or caret index)
+                symbol = data.get('symbol') or ''
+                if symbol.startswith('^'):
+                    return True
+                if 1 <= len(symbol) <= 5 and symbol.upper() == symbol:
+                    return True
+                return False
+
+            # First check if the entire query looks like a ticker
+            original_query = query.strip()
+            normalized_query = original_query.upper()
+            
+            # Only try as direct ticker if:
+            # 1. Starts with ^ (index), OR
+            # 2. Is 1-5 chars AND original query is already uppercase (likely typed as ticker)
+            # 3. Is 1-5 chars AND contains numbers/dots/hyphens (e.g., BRK.B, M1)
+            is_ticker_like = (
+                normalized_query.startswith('^') or 
+                (len(normalized_query) <= 5 and original_query.isupper()) or
+                (len(normalized_query) <= 5 and any(c in original_query for c in '.0123456789-'))
+            )
+            
+            if is_ticker_like:
+                # Try validating as a ticker
+                quote_result = self.repository.get_quote(normalized_query)
+                if _is_valid_quote(quote_result):
+                    data = quote_result['data']
+                    longname = data.get('name') or data.get('shortName') or data.get('longName') or data.get('symbol') or normalized_query
+                    return CompanyMatch(
+                        symbol=data.get('symbol', normalized_query),
+                        long_name=longname,
+                        short_name=data.get('shortName')
+                    )
+            
             # Extract candidate tokens (caret-prefixed or alphanumeric)
             candidates = re.findall(r"\b[\^A-Za-z0-9\.\-]{1,6}\b", query)
             
@@ -58,12 +112,11 @@ class StockAnalysisService:
                 
                 # Validate ticker
                 quote_result = self.repository.get_quote(cand)
-                if isinstance(quote_result, dict) and quote_result.get('status') == 'ok':
-                    data = quote_result.get('data', {})
-                    longname = data.get('name') or data.get('shortName') or data.get('longName') or cand
-                    
+                if _is_valid_quote(quote_result):
+                    data = quote_result['data']
+                    longname = data.get('name') or data.get('shortName') or data.get('longName') or data.get('symbol') or cand
                     return CompanyMatch(
-                        symbol=cand,
+                        symbol=data.get('symbol', cand),
                         long_name=longname,
                         short_name=data.get('shortName')
                     )
@@ -74,7 +127,9 @@ class StockAnalysisService:
     
     def _search_company(self, query: str) -> Optional[CompanyMatch]:
         """Search for company by name"""
+        print(f"[DEBUG] Searching company for query: {query}")
         match = self.repository.search_company(query)
+        print(f"[DEBUG] Company search returned: {match}")
         if not match:
             return None
         

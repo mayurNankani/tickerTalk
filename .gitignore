@@ -1,1 +1,42 @@
 .vscode/*
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+*.egg-info/
+dist/
+build/
+.venv/
+venv/
+ENV/
+
+# HuggingFace models and cache (FinBERT)
+.cache/
+models/
+*.bin
+*.safetensors
+pytorch_model.bin
+tf_model.h5
+
+# Environment variables
+.env
+*.env
+!.env.example
+
+# IDE
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+logs/
+

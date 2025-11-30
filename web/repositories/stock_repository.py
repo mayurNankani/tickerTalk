@@ -13,8 +13,8 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '../.
 
 from src.tools.company_search import CompanySearch
 from src.mcp_agent import YahooFinanceAgent
-from src.agent import StockAnalysisAgent
-from src.tools.rss_news import RSSNewsAgent
+from src.agent_improved import StockAnalysisAgentImproved as StockAnalysisAgent
+from src.tools.finnhub_news import FinnhubNewsAgent
 
 
 class IStockRepository(ABC):
@@ -61,11 +61,13 @@ class StockRepository(IStockRepository):
         self.company_search = CompanySearch()
         self.yahoo_agent = YahooFinanceAgent()
         self.analysis_agent = StockAnalysisAgent()
-        self.news_agent = RSSNewsAgent()
+        self.news_agent = FinnhubNewsAgent()
     
     def search_company(self, query: str) -> Optional[Dict[str, Any]]:
         """Search for company and return best match"""
+        print(f"[DEBUG] Repository search_company called with: '{query}'")
         search_result = self.company_search.analyze(query)
+        print(f"[DEBUG] CompanySearch.analyze returned: {search_result}")
         
         # Handle ToolResult return type
         if hasattr(search_result, 'data'):
@@ -73,7 +75,10 @@ class StockRepository(IStockRepository):
         else:
             matches = search_result.get('matches', [])
         
-        return matches[0] if matches else None
+        print(f"[DEBUG] Extracted matches: {matches}")
+        result = matches[0] if matches else None
+        print(f"[DEBUG] Returning match: {result}")
+        return result
     
     def validate_ticker(self, ticker: str) -> bool:
         """Validate if ticker exists by attempting to get quote"""

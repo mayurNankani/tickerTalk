@@ -111,6 +111,7 @@ class TechnicalAnalysis(AnalysisTool):
         # Moving Averages
         df['SMA_20'] = ta.trend.SMAIndicator(df['Close'], window=20).sma_indicator()
         df['SMA_50'] = ta.trend.SMAIndicator(df['Close'], window=50).sma_indicator()
+        df['SMA_200'] = ta.trend.SMAIndicator(df['Close'], window=200).sma_indicator()
         df['EMA_20'] = ta.trend.EMAIndicator(df['Close'], window=20).ema_indicator()
         
         return df
@@ -154,13 +155,19 @@ class TechnicalAnalysis(AnalysisTool):
             # Moving Averages
             "sma_20": latest['SMA_20'],
             "sma_50": latest['SMA_50'],
+            "sma_200": latest['SMA_200'],
             "ema_20": latest['EMA_20'],
             
             # Trend Signals
             "above_sma_20": latest['Close'] > latest['SMA_20'],
             "above_sma_50": latest['Close'] > latest['SMA_50'],
+            "above_sma_200": latest['Close'] > latest['SMA_200'],
             "sma_20_cross_50": (
                 prev['SMA_20'] <= prev['SMA_50'] and 
                 latest['SMA_20'] > latest['SMA_50']
+            ),
+            "sma_50_cross_200": (
+                prev['SMA_50'] <= prev['SMA_200'] and 
+                latest['SMA_50'] > latest['SMA_200']
             )
         }

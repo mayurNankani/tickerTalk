@@ -5,6 +5,10 @@ Centralized configuration management for the Flask application
 
 import os
 from typing import Dict
+from dotenv import load_dotenv
+
+# Load environment variables from config/.env file (doesn't override existing env vars)
+load_dotenv(os.path.join(os.path.dirname(__file__), '..', 'config', '.env'), override=False)
 
 
 class Config:

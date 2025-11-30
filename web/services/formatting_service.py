@@ -89,9 +89,49 @@ class FormattingService:
             f'{label_html}</div>'
         )
     
-    @staticmethod
-    def expand_block(term: str, label: str, bar: str, bullets: str, idx: int) -> str:
-        """Create expandable recommendation section"""
+    def expand_block(self, term: str, label: str, bar: str, bullets: str, idx: int, 
+                     fundamental_summary: str = None, technical_summary: str = None, sentiment_summary: str = None) -> str:
+        """Create expandable recommendation section with separate fundamental, technical, and sentiment reasons"""
+        
+        sections = []
+        
+        # Add fundamental section if available
+        if fundamental_summary:
+            fund_bullets = self.to_bullets(self.add_tooltips(fundamental_summary))
+            sections.append(f'''
+                <div style="margin-bottom:8px;">
+                    <b style="color:#2563eb;">📊 Fundamental:</b>
+                    {fund_bullets}
+                </div>
+            ''')
+        
+        # Add technical section if available
+        if technical_summary:
+            tech_bullets = self.to_bullets(self.add_tooltips(technical_summary))
+            sections.append(f'''
+                <div style="margin-bottom:8px;">
+                    <b style="color:#059669;">📈 Technical:</b>
+                    {tech_bullets}
+                </div>
+            ''')
+        
+        # Add sentiment section if available
+        if sentiment_summary:
+            sentiment_bullets = self.to_bullets(self.add_tooltips(sentiment_summary))
+            sections.append(f'''
+                <div style="margin-bottom:8px;">
+                    <b style="color:#7c3aed;">💭 Sentiment:</b>
+                    {sentiment_bullets}
+                </div>
+            ''')
+        
+        # Build reasons HTML
+        if sections:
+            reasons_html = f'<div style="margin-top:10px;">{"".join(sections)}</div>'
+        else:
+            # Fallback to single bullets
+            reasons_html = bullets
+        
         return f'''
         <div style="margin-bottom:18px;">
             <b>{term}: {label}</b><br>
@@ -100,7 +140,7 @@ class FormattingService:
                 if(e.style.display==='none'){{e.style.display='block';this.innerText='Hide reasons';}}
                 else{{e.style.display='none';this.innerText='Show reasons';}}
                 return false;" style="font-size:0.95em;">Show reasons</a>
-            <div id="reasons_{idx}" style="display:none;">{bullets}</div>
+            <div id="reasons_{idx}" style="display:none;">{reasons_html}</div>
         </div>
         '''
     
@@ -132,20 +172,32 @@ class FormattingService:
             price_history = analysis.get('price_history', {'dates': [], 'prices': []})
             news = analysis['news']
         
-        # Build header with company name
+        # Build header with company name and logo
         display_name = self._get_display_name(company_name, quote)
+        logo_html = self._format_logo(ticker)
         price_html = self._format_price_line(quote)
         price_chart_html = self._format_price_chart(ticker, price_history)
         news_html = self._format_news(news)
         recommendations_html = self._format_recommendations(recommendations)
         
         return (
-            f"<b>{display_name}</b><br>"
-            f"{price_html}<br>"
+            f"<div style='display:flex;align-items:center;gap:12px;margin-bottom:8px;'>"
+            f"{logo_html}"
+            f"<div>"
+            f"<b style='font-size:1.1em;'>{display_name}</b><br>"
+            f"{price_html}"
+            f"</div>"
+            f"</div>"
             f"{price_chart_html}"
             f"{news_html}"
             f"{recommendations_html}"
         )
+    
+    def _format_logo(self, ticker: str) -> str:
+        """Format company logo using Finnhub logo API"""
+        # Use Finnhub's logo endpoint (works without API key for logos)
+        logo_url = f"https://finnhub.io/api/logo?symbol={ticker}"
+        return f'<img src="{logo_url}" alt="{ticker}" style="width:48px;height:48px;border-radius:8px;object-fit:contain;background:white;padding:4px;border:1px solid #e5e7eb;" onerror="this.style.display=' + "'none'" + '"/>'
     
     def _get_display_name(self, company_name: str, quote: Dict[str, Any]) -> str:
         """Get best display name from quote data"""
@@ -172,7 +224,7 @@ class FormattingService:
                 except Exception:
                     price_text = str(price)
                 
-                return f"<div><b>Price:</b> {price_text} {currency}</div>"
+                return f"<span style='font-size:0.95em;color:#6b7280;'>{price_text} {currency}</span>"
         except Exception:
             pass
         
@@ -234,28 +286,93 @@ class FormattingService:
         short = recommendations.get('short_term', {})
         medium = recommendations.get('medium_term', {})
         long = recommendations.get('long_term', {})
+        fundamental = recommendations.get('fundamental', {})
+        technical = recommendations.get('technical', {})
+        sentiment = recommendations.get('sentiment', {})
+        
+        # Extract fundamental, technical, and sentiment summaries
+        fund_summary = fundamental.get('summary', '')
+        tech_summary = technical.get('summary', '')
+        sentiment_summary = sentiment.get('summary', '')
+        
+        # Parse short-term summary (technical + sentiment)
+        short_summary = short.get('summary', '')
+        short_tech = ''
+        short_sentiment = ''
+        
+        if '|' in short_summary:
+            parts = short_summary.split('|')
+            for part in parts:
+                part = part.strip()
+                if part.startswith('Technical:'):
+                    short_tech = part.replace('Technical:', '').strip()
+                elif part.startswith('Sentiment:'):
+                    short_sentiment = part.replace('Sentiment:', '').strip()
+        
+        # Parse medium-term summary (fundamental + technical + sentiment)
+        medium_summary = medium.get('summary', '')
+        medium_fund = ''
+        medium_tech = ''
+        medium_sentiment = ''
+        
+        if '|' in medium_summary:
+            parts = medium_summary.split('|')
+            for part in parts:
+                part = part.strip()
+                if part.startswith('Fundamentals:'):
+                    medium_fund = part.replace('Fundamentals:', '').strip()
+                elif part.startswith('Technical:'):
+                    medium_tech = part.replace('Technical:', '').strip()
+                elif part.startswith('Sentiment:'):
+                    medium_sentiment = part.replace('Sentiment:', '').strip()
+        
+        # Parse long-term summary (fundamental + technical + sentiment)
+        long_summary = long.get('summary', '')
+        long_fund = ''
+        long_tech = ''
+        long_sentiment = ''
+        
+        if '|' in long_summary:
+            parts = long_summary.split('|')
+            for part in parts:
+                part = part.strip()
+                if part.startswith('Fundamentals:'):
+                    long_fund = part.replace('Fundamentals:', '').strip()
+                elif part.startswith('Technical:'):
+                    long_tech = part.replace('Technical:', '').strip()
+                elif part.startswith('Sentiment:'):
+                    long_sentiment = part.replace('Sentiment:', '').strip()
         
         blocks = [
             self.expand_block(
                 'Short-term (1 week)',
                 short.get('label', 'N/A'),
                 self.heatmap(short.get('label', 'N/A')),
-                self.to_bullets(self.add_tooltips(short.get('summary', ''))),
-                1
+                '',  # bullets placeholder
+                1,
+                fundamental_summary=None,
+                technical_summary=short_tech or tech_summary,
+                sentiment_summary=short_sentiment or sentiment_summary
             ),
             self.expand_block(
                 'Medium-term (3 months)',
                 medium.get('label', 'N/A'),
                 self.heatmap(medium.get('label', 'N/A')),
-                self.to_bullets(self.add_tooltips(medium.get('summary', ''))),
-                2
+                '',  # bullets placeholder
+                2,
+                fundamental_summary=medium_fund or fund_summary,
+                technical_summary=medium_tech or tech_summary,
+                sentiment_summary=medium_sentiment or sentiment_summary
             ),
             self.expand_block(
                 'Long-term (6-12 months)',
                 long.get('label', 'N/A'),
                 self.heatmap(long.get('label', 'N/A')),
-                self.to_bullets(self.add_tooltips(long.get('summary', ''))),
-                3
+                '',  # bullets placeholder
+                3,
+                fundamental_summary=long_fund or fund_summary,
+                technical_summary=long_tech or tech_summary,
+                sentiment_summary=long_sentiment  # Only show if explicitly in long-term summary (not fallback)
             )
         ]
         
