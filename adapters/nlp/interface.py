@@ -1,0 +1,6 @@
+"""Protocol for language model operations (summaries, Q&A)."""
+from typing import Protocol
+
+class LLMAdapter(Protocol):
+    def summarize(self, text: str, max_tokens: int = 256) -> str: ...
+    def answer(self, question: str, context: str, model: str = "default") -> str: ...

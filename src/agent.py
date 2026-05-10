@@ -87,10 +87,22 @@ class StockAnalysisAgent:
             Dict[str, Any]: Combined analysis results
         """
         # Perform fundamental analysis
-        fundamental_results = self.fundamental_analyzer.analyze(ticker)
+        fundamental_result_obj = self.fundamental_analyzer.analyze(ticker)
+        
+        # Extract data from ToolResult or use directly if dict
+        if hasattr(fundamental_result_obj, 'data'):
+            fundamental_results = fundamental_result_obj.data if fundamental_result_obj.data else {}
+        else:
+            fundamental_results = fundamental_result_obj
 
         # Perform technical analysis
-        technical_results = self.technical_analyzer.analyze(ticker)
+        technical_result_obj = self.technical_analyzer.analyze(ticker)
+        
+        # Extract data from ToolResult or use directly if dict
+        if hasattr(technical_result_obj, 'data'):
+            technical_results = technical_result_obj.data if technical_result_obj.data else {}
+        else:
+            technical_results = technical_result_obj
 
         # Build human-friendly summaries using the tooltip mappings
         fundamental_summary = []
@@ -468,7 +480,13 @@ class StockAnalysisAgent:
         Returns:
             Dict[str, Any]: Search results with possible matches
         """
-        return self.company_searcher.analyze(company_name)
+        result_obj = self.company_searcher.analyze(company_name)
+        
+        # Extract data from ToolResult or use directly if dict
+        if hasattr(result_obj, 'data'):
+            return result_obj.data if result_obj.data else {'matches': [], 'count': 0}
+        else:
+            return result_obj
 
     def get_best_ticker_match(self, company_name: str) -> Optional[str]:
         """

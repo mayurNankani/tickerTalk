@@ -4,3 +4,11 @@ yfinance
 ta  # Technical analysis library
 python-dotenv
 yahooquery  # For company symbol search
+flask
+gunicorn  # Production WSGI server
+beautifulsoup4  # For web scraping
+requests  # For HTTP requests
+google-generativeai  # For Gemini API (optional)
+torch  # PyTorch for FinBERT
+transformers  # HuggingFace transformers for FinBERT
+sentencepiece  # Required by some tokenizers
