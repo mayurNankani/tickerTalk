@@ -153,12 +153,12 @@
         }
 
         .chat-area {
-            max-width: 860px;
+            width: min(100%, 980px);
             margin: 0 auto;
             display: flex;
             flex-direction: column;
             gap: 1rem;
-            padding: 0 0.5rem;
+            padding: 0;
         }
 
         /* === MESSAGES === */
@@ -171,9 +171,17 @@
             display: flex;
             gap: 0.75rem;
             animation: fadeSlideIn 0.25s ease forwards;
+            width: 100%;
+            max-width: 100%;
+            margin: 0;
         }
 
         .message.user { flex-direction: row-reverse; }
+
+        .empty-state {
+            max-width: 980px;
+            margin: 0 auto;
+        }
 
         .avatar {
             width: 32px;
@@ -203,7 +211,7 @@
             display: flex;
             flex-direction: column;
             gap: 0.25rem;
-            max-width: calc(100% - 44px);
+            max-width: calc(100% - 36px);
         }
 
         .message-label {
@@ -381,6 +389,310 @@
             box-shadow: var(--glow);
         }
 
+        /* === MARKET OVERVIEW === */
+        .market-overview {
+            width: 100%;
+            max-width: none;
+            margin: 0 0 2rem;
+            padding: 0;
+        }
+
+        .market-section {
+            margin-bottom: 2.5rem;
+            animation: fadeSlideIn 0.4s ease forwards;
+        }
+
+        .market-section-title {
+            font-size: 0.95rem;
+            font-weight: 600;
+            color: var(--text-1);
+            margin-bottom: 1rem;
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+            display: flex;
+            align-items: center;
+            gap: 0.5rem;
+        }
+
+        .market-section-title::before {
+            content: '';
+            width: 3px;
+            height: 18px;
+            background: var(--accent);
+            border-radius: 2px;
+        }
+
+        .card-carousel {
+            display: grid;
+            grid-template-columns: repeat(2, minmax(0, 1fr));
+            gap: 0.5rem;
+            padding-bottom: 0.25rem;
+        }
+
+        @media (min-width: 700px) {
+            .card-carousel {
+                grid-template-columns: repeat(3, minmax(0, 1fr));
+            }
+        }
+
+        @media (min-width: 980px) {
+            .card-carousel {
+                grid-template-columns: repeat(5, minmax(0, 1fr));
+            }
+        }
+
+        .market-card {
+            background: var(--surface);
+            border: 1px solid var(--border);
+            border-radius: var(--radius-md);
+            padding: 0.65rem 0.7rem;
+            cursor: pointer;
+            transition: all 0.2s;
+            display: flex;
+            flex-direction: column;
+            gap: 0.35rem;
+        }
+
+        .market-card:hover {
+            background: var(--surface-2);
+            border-color: var(--accent);
+            box-shadow: 0 4px 12px rgba(20, 184, 166, 0.15);
+            transform: translateY(-2px);
+        }
+
+        .market-card-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: flex-start;
+        }
+
+        .market-card-symbol {
+            font-weight: 700;
+            font-size: 0.88rem;
+            color: var(--text-1);
+        }
+
+        .market-card-name {
+            font-size: 0.68rem;
+            color: var(--text-3);
+            margin-top: 0.15rem;
+            white-space: nowrap;
+            overflow: hidden;
+            text-overflow: ellipsis;
+        }
+
+        .market-card-price {
+            font-size: 1rem;
+            font-weight: 600;
+            color: var(--text-1);
+        }
+
+        .market-card-change {
+            display: flex;
+            align-items: center;
+            gap: 0.5rem;
+        }
+
+        .market-card-change.positive {
+            color: var(--green);
+        }
+
+        .market-card-change.negative {
+            color: var(--red);
+        }
+
+        .market-card-change-value {
+            font-weight: 600;
+            font-size: 0.78rem;
+        }
+
+        .market-card-volume {
+            font-size: 0.68rem;
+            color: var(--text-3);
+            margin-top: 0.2rem;
+        }
+
+        .loading-spinner {
+            display: inline-block;
+            width: 14px;
+            height: 14px;
+            border: 2px solid rgba(20, 184, 166, 0.3);
+            border-top-color: var(--accent);
+            border-radius: 50%;
+            animation: spin 0.8s linear infinite;
+        }
+
+        @keyframes spin {
+            to { transform: rotate(360deg); }
+        }
+
+        /* === QUICK PREVIEW MODAL === */
+        .modal {
+            display: none;
+            position: fixed;
+            top: 0;
+            left: 0;
+            right: 0;
+            bottom: 0;
+            background: rgba(0, 0, 0, 0.5);
+            z-index: 1000;
+            align-items: center;
+            justify-content: center;
+            padding: 1rem;
+        }
+
+        .modal.active {
+            display: flex;
+            animation: fadeSlideIn 0.25s ease forwards;
+        }
+
+        .modal-content {
+            background: var(--surface);
+            border: 1px solid var(--border);
+            border-radius: var(--radius-lg);
+            padding: 1.5rem;
+            max-width: 400px;
+            width: 100%;
+            box-shadow: var(--shadow-lg);
+            position: relative;
+        }
+
+        .modal-close {
+            position: absolute;
+            top: 1rem;
+            right: 1rem;
+            background: transparent;
+            border: none;
+            color: var(--text-2);
+            cursor: pointer;
+            font-size: 1.5rem;
+            padding: 0;
+            width: 32px;
+            height: 32px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            transition: color 0.2s;
+        }
+
+        .modal-close:hover {
+            color: var(--text-1);
+        }
+
+        .modal-header {
+            margin-bottom: 1.5rem;
+            padding-right: 2rem;
+        }
+
+        .modal-symbol {
+            font-size: 1.5rem;
+            font-weight: 700;
+            color: var(--text-1);
+        }
+
+        .modal-name {
+            font-size: 0.875rem;
+            color: var(--text-2);
+            margin-top: 0.25rem;
+        }
+
+        .modal-price-section {
+            margin-bottom: 1.5rem;
+            padding: 1rem;
+            background: var(--surface-2);
+            border-radius: var(--radius-md);
+        }
+
+        .modal-price {
+            font-size: 2rem;
+            font-weight: 700;
+            color: var(--text-1);
+            margin-bottom: 0.5rem;
+        }
+
+        .modal-change {
+            display: flex;
+            align-items: center;
+            gap: 0.5rem;
+            font-size: 1rem;
+            font-weight: 600;
+        }
+
+        .modal-change.positive {
+            color: var(--green);
+        }
+
+        .modal-change.negative {
+            color: var(--red);
+        }
+
+        .modal-details {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 1rem;
+            margin-bottom: 1.5rem;
+            font-size: 0.875rem;
+        }
+
+        .modal-detail-item {
+            display: flex;
+            flex-direction: column;
+            gap: 0.25rem;
+        }
+
+        .modal-detail-label {
+            color: var(--text-3);
+            font-weight: 500;
+        }
+
+        .modal-detail-value {
+            color: var(--text-1);
+            font-weight: 600;
+        }
+
+        .modal-actions {
+            display: flex;
+            gap: 0.75rem;
+        }
+
+        .modal-btn {
+            flex: 1;
+            padding: 0.75rem 1.25rem;
+            border: none;
+            border-radius: var(--radius-md);
+            font-weight: 600;
+            cursor: pointer;
+            transition: all 0.2s;
+            font-size: 0.875rem;
+        }
+
+        .modal-btn.primary {
+            background: var(--accent);
+            color: white;
+        }
+
+        .modal-btn.primary:hover {
+            background: var(--accent-dark);
+            box-shadow: var(--glow);
+        }
+
+        .modal-btn.secondary {
+            background: var(--surface-2);
+            color: var(--text-2);
+            border: 1px solid var(--border);
+        }
+
+        .modal-btn.secondary:hover {
+            background: var(--surface-3);
+            color: var(--text-1);
+            border-color: var(--accent);
+        }
+
+        .market-overview.loading {
+            opacity: 0.6;
+            pointer-events: none;
+        }
+
         /* === SCROLL INDICATOR === */
         #scrollIndicator {
             position: fixed;
@@ -424,7 +736,7 @@
         }
 
         .input-container {
-            max-width: 860px;
+            width: min(100%, 980px);
             margin: 0 auto;
             display: flex;
             gap: 0.625rem;
@@ -1014,6 +1326,83 @@
                     <button class="example-chip" onclick="useExample(this)">Give me a NVIDIA report</button>
                 </div>
             </div>
+
+            <!-- Market Overview Sections -->
+            <div class="market-overview" id="marketOverview">
+                <!-- Movers Section -->
+                <div class="market-section" id="moversSection" style="display: none;">
+                    <div class="market-section-title">Top Movers</div>
+                    <div class="card-carousel" id="moversCarousel"></div>
+                </div>
+
+                <!-- Gainers Section -->
+                <div class="market-section" id="gainersSection" style="display: none;">
+                    <div class="market-section-title">Top Market Cap</div>
+                    <div class="card-carousel" id="gainersCarousel"></div>
+                </div>
+
+                <!-- Losers Section -->
+                <div class="market-section" id="losersSection" style="display: none;">
+                    <div class="market-section-title">Top Losers</div>
+                    <div class="card-carousel" id="losersCarousel"></div>
+                </div>
+
+                <!-- Most Active Section -->
+                <div class="market-section" id="activeSection" style="display: none;">
+                    <div class="market-section-title">Most Active</div>
+                    <div class="card-carousel" id="activeCarousel"></div>
+                </div>
+
+                <!-- Market Indices Section -->
+                <div class="market-section" id="indicesSection" style="display: none;">
+                    <div class="market-section-title">Market Indices</div>
+                    <div class="card-carousel" id="indicesCarousel"></div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Quick Preview Modal -->
+        <div class="modal" id="previewModal">
+            <div class="modal-content">
+                <button class="modal-close" onclick="closeModal()">✕</button>
+                
+                <div class="modal-header">
+                    <div class="modal-symbol" id="modalSymbol">AAPL</div>
+                    <div class="modal-name" id="modalName">Apple Inc.</div>
+                </div>
+
+                <div class="modal-price-section">
+                    <div class="modal-price" id="modalPrice">$150.00</div>
+                    <div class="modal-change" id="modalChange">
+                        <span id="modalChangeIcon">▲</span>
+                        <span id="modalChangeValue">+1.23%</span>
+                    </div>
+                </div>
+
+                <div class="modal-details">
+                    <div class="modal-detail-item">
+                        <div class="modal-detail-label">52W High</div>
+                        <div class="modal-detail-value" id="modalHigh">$175.00</div>
+                    </div>
+                    <div class="modal-detail-item">
+                        <div class="modal-detail-label">52W Low</div>
+                        <div class="modal-detail-value" id="modalLow">$125.00</div>
+                    </div>
+                    <div class="modal-detail-item">
+                        <div class="modal-detail-label">Market Cap</div>
+                        <div class="modal-detail-value" id="modalMarketCap">$2.5T</div>
+                    </div>
+                    <div class="modal-detail-item">
+                        <div class="modal-detail-label">Volume</div>
+                        <div class="modal-detail-value" id="modalVolume">52.3M</div>
+                    </div>
+                </div>
+
+                <div class="modal-actions">
+                    <button class="modal-btn primary" onclick="analyzeFromModal()">Analyze</button>
+                    <button class="modal-btn secondary" onclick="closeModal()">Cancel</button>
+                </div>
+            </div>
         </div>
     </main>
 
@@ -1356,8 +1745,14 @@
                         state.chatHistory.push({ role: 'assistant', content: data.reply });
                         elements.chatOutput.insertAdjacentHTML('beforeend', utils.formatMessage('assistant', data.reply));
                     } else if (data.reply) {
-                        // Still store in history for context, but don't show a second bubble
-                        state.chatHistory.push({ role: 'assistant', content: analysisFromReply ? `I ran a full analysis for ${analysisFromReply.ticker}.` : data.reply });
+                        // Show companion reply when it includes source links; otherwise avoid duplicate bubbles.
+                        const hasLinkContent = /<a\s+href=|<b>Sources:<\/b>/i.test(data.reply);
+                        if (!analysisFromReply && data.analysis_html && hasLinkContent) {
+                            state.chatHistory.push({ role: 'assistant', content: data.reply });
+                            elements.chatOutput.insertAdjacentHTML('beforeend', utils.formatMessage('assistant', data.reply));
+                        } else {
+                            state.chatHistory.push({ role: 'assistant', content: analysisFromReply ? `I ran a full analysis for ${analysisFromReply.ticker}.` : data.reply });
+                        }
                     } else if (!data.analysis_html && !analysisFromReply) {
                         throw new Error('No reply received');
                     }
@@ -2047,6 +2442,202 @@
                 console.error('Error rendering chart:', err);
             }
         }
+
+        // ===================================================================
+        // Market Overview
+        // ===================================================================
+        let marketOverviewData = null;
+        let marketRefreshInterval = null;
+
+        // Initialize market overview on page load
+        async function initializeMarketOverview() {
+            try {
+                await loadMarketOverview();
+                // Auto-refresh every 5 minutes
+                marketRefreshInterval = setInterval(() => {
+                    loadMarketOverview();
+                }, 5 * 60 * 1000);
+            } catch (err) {
+                console.error('Failed to initialize market overview:', err);
+            }
+        }
+
+        async function loadMarketOverview() {
+            const overview = document.getElementById('marketOverview');
+            if (!overview) return;
+
+            try {
+                overview.classList.add('loading');
+                const response = await fetch('/api/market-overview');
+                if (!response.ok) throw new Error('Network response was not ok');
+                
+                const data = await response.json();
+                marketOverviewData = data;
+                
+                renderMarketSections(data);
+            } catch (err) {
+                console.error('Error loading market overview:', err);
+                // Show error state
+                showMarketError();
+            } finally {
+                overview.classList.remove('loading');
+            }
+        }
+
+        function renderMarketSections(data) {
+            // Render each section if it has data
+            if (data.movers && data.movers.length > 0) {
+                renderMarketSection('moversSection', 'moversCarousel', data.movers);
+            }
+            if (data.gainers && data.gainers.length > 0) {
+                renderMarketSection('gainersSection', 'gainersCarousel', data.gainers);
+            }
+            if (data.losers && data.losers.length > 0) {
+                renderMarketSection('losersSection', 'losersCarousel', data.losers);
+            }
+            if (data.most_active && data.most_active.length > 0) {
+                renderMarketSection('activeSection', 'activeCarousel', data.most_active);
+            }
+            if (data.indices && data.indices.length > 0) {
+                renderMarketSection('indicesSection', 'indicesCarousel', data.indices);
+            }
+        }
+
+        function renderMarketSection(sectionId, carouselId, items) {
+            const section = document.getElementById(sectionId);
+            const carousel = document.getElementById(carouselId);
+            
+            if (!section || !carousel) return;
+
+            section.style.display = 'block';
+            carousel.innerHTML = '';
+
+            items.forEach(item => {
+                const card = createMarketCard(item);
+                carousel.appendChild(card);
+            });
+        }
+
+        function createMarketCard(item) {
+            const card = document.createElement('div');
+            card.className = 'market-card';
+            card.onclick = () => openModal(item);
+
+            const isPositive = item.change_percent >= 0;
+            const changeIcon = isPositive ? '▲' : '▼';
+            const changeClass = isPositive ? 'positive' : 'negative';
+
+            const volumeDisplay = item.volume ? formatVolume(item.volume) : 'N/A';
+
+            card.innerHTML = `
+                <div class="market-card-header">
+                    <div>
+                        <div class="market-card-symbol">${item.symbol}</div>
+                        <div class="market-card-name">${item.name}</div>
+                    </div>
+                </div>
+                <div class="market-card-price">$${item.price.toFixed(2)}</div>
+                <div class="market-card-change ${changeClass}">
+                    <span>${changeIcon}</span>
+                    <span class="market-card-change-value">${isPositive ? '+' : ''}${item.change_percent.toFixed(2)}%</span>
+                </div>
+                <div class="market-card-volume">Vol: ${volumeDisplay}</div>
+            `;
+
+            return card;
+        }
+
+        function formatVolume(volume) {
+            if (volume >= 1e9) return (volume / 1e9).toFixed(2) + 'B';
+            if (volume >= 1e6) return (volume / 1e6).toFixed(2) + 'M';
+            if (volume >= 1e3) return (volume / 1e3).toFixed(2) + 'K';
+            return volume.toString();
+        }
+
+        function formatMarketCap(marketCap) {
+            if (!marketCap) return 'N/A';
+            if (marketCap >= 1e12) return '$' + (marketCap / 1e12).toFixed(2) + 'T';
+            if (marketCap >= 1e9) return '$' + (marketCap / 1e9).toFixed(2) + 'B';
+            if (marketCap >= 1e6) return '$' + (marketCap / 1e6).toFixed(2) + 'M';
+            return '$' + marketCap.toFixed(2);
+        }
+
+        function openModal(item) {
+            const modal = document.getElementById('previewModal');
+            if (!modal) return;
+
+            // Store the current symbol for the analyze button
+            modal.dataset.symbol = item.symbol;
+
+            // Update modal content
+            document.getElementById('modalSymbol').textContent = item.symbol;
+            document.getElementById('modalName').textContent = item.name;
+            document.getElementById('modalPrice').textContent = '$' + item.price.toFixed(2);
+
+            const isPositive = item.change_percent >= 0;
+            const changeElement = document.getElementById('modalChange');
+            const changeIcon = document.getElementById('modalChangeIcon');
+            const changeValue = document.getElementById('modalChangeValue');
+
+            changeElement.className = 'modal-change ' + (isPositive ? 'positive' : 'negative');
+            changeIcon.textContent = isPositive ? '▲' : '▼';
+            changeValue.textContent = (isPositive ? '+' : '') + item.change_percent.toFixed(2) + '%';
+
+            // Set optional fields or show N/A
+            document.getElementById('modalHigh').textContent = item.week_52_high ? '$' + item.week_52_high.toFixed(2) : 'N/A';
+            document.getElementById('modalLow').textContent = item.week_52_low ? '$' + item.week_52_low.toFixed(2) : 'N/A';
+            document.getElementById('modalMarketCap').textContent = formatMarketCap(item.market_cap);
+            document.getElementById('modalVolume').textContent = item.volume ? formatVolume(item.volume) : 'N/A';
+
+            modal.classList.add('active');
+            document.body.style.overflow = 'hidden';
+        }
+
+        function closeModal() {
+            const modal = document.getElementById('previewModal');
+            if (modal) {
+                modal.classList.remove('active');
+                document.body.style.overflow = 'auto';
+            }
+        }
+
+        async function analyzeFromModal() {
+            const modal = document.getElementById('previewModal');
+            const symbol = modal.dataset.symbol;
+            if (!symbol) return;
+
+            closeModal();
+            utils.clearEmptyState();
+            await chat.sendMessage(`Analyze ${symbol}`);
+        }
+
+        function showMarketError() {
+            const overview = document.getElementById('marketOverview');
+            if (!overview) return;
+            overview.innerHTML = '<p style="text-align: center; color: var(--text-3); padding: 2rem;">Unable to load market data. Please refresh the page.</p>';
+        }
+
+        // Close modal when clicking outside
+        document.addEventListener('click', (e) => {
+            const modal = document.getElementById('previewModal');
+            if (modal && modal.classList.contains('active')) {
+                if (e.target === modal) {
+                    closeModal();
+                }
+            }
+        });
+
+        // Initialize market overview when page loads
+        document.addEventListener('DOMContentLoaded', () => {
+            initializeMarketOverview();
+        });
+
+        // Clean up interval on page unload
+        window.addEventListener('beforeunload', () => {
+            if (marketRefreshInterval) {
+                clearInterval(marketRefreshInterval);
+            }
+        });
     </script>
 </body>
 </html>

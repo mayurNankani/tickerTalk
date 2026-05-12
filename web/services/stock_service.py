@@ -8,10 +8,12 @@ from typing import Dict, Any, Optional, List
 from repositories.stock_repository import IStockRepository
 from application.use_cases.run_stock_analysis import StockAnalysisUseCase
 from adapters.market_data.yahoo_finance_adapter import YahooFinanceAdapter
+from adapters.market_data.yahoo_finance_screener_adapter import YahooFinanceScreenerAdapter
 from adapters.news.finnhub_adapter import FinnhubNewsAdapter
 from adapters.sentiment.finbert_adapter import FinbertSentimentAdapter
 from adapters.company_lookup.yahoo_company_lookup_adapter import YahooCompanyLookupAdapter
 from models import StockAnalysis, CompanyMatch
+from core.models.market import MarketOverview
 
 
 class StockAnalysisService:
@@ -27,6 +29,7 @@ class StockAnalysisService:
         news = getattr(repository, 'news_adapter', FinnhubNewsAdapter())
         company_lookup = getattr(repository, 'company_lookup', YahooCompanyLookupAdapter())
         sentiment = FinbertSentimentAdapter()
+        self.screener = YahooFinanceScreenerAdapter()  # Market screener adapter
         self.use_case = StockAnalysisUseCase(
             market_data=market,
             news_adapter=news,
@@ -303,3 +306,23 @@ class StockAnalysisService:
     def get_stock_info(self, ticker: str) -> Dict[str, Any]:
         """Get comprehensive stock info"""
         return self.repository.get_stock_info(ticker)
+    
+    def get_market_overview(self) -> MarketOverview:
+        """
+        Fetch market-wide overview (top movers, gainers, losers, most active, indices).
+        
+        Returns:
+            MarketOverview with all sections (fails open with empty lists on errors)
+        """
+        try:
+            return self.screener.get_market_overview()
+        except Exception as e:
+            print(f"[WARN] Error fetching market overview: {e}")
+            # Return empty overview on failure to prevent crash
+            return MarketOverview(
+                movers=[],
+                gainers=[],
+                losers=[],
+                most_active=[],
+                indices=[],
+            )

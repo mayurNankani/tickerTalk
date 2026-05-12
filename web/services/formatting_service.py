@@ -7,6 +7,7 @@ import re
 import time
 from datetime import datetime
 from typing import Dict, Any
+from src.tools.web_search import normalize_result_url
 
 
 # Tooltip definitions
@@ -339,7 +340,7 @@ class FormattingService:
 
         def _render_cards(items):
             return ''.join(
-                f'<a href="{item["url"]}" target="_blank" rel="noopener" class="news-card">'
+                f'<a href="{normalize_result_url(item["url"])}" target="_blank" rel="noopener" class="news-card">'
                 f'<div class="news-card-headline">{item["headline"]}</div>'
                 f'<div class="news-card-meta">View article \u2192</div>'
                 f'</a>'

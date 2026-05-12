@@ -7,8 +7,49 @@ import requests
 from bs4 import BeautifulSoup
 from typing import List, Dict, Optional
 import logging
+from urllib.parse import urljoin, urlparse, parse_qs, unquote
 
 logger = logging.getLogger(__name__)
+
+
+def normalize_result_url(raw_url: str) -> str:
+    """Convert DuckDuckGo redirect URLs into direct destination links."""
+    if not raw_url:
+        return ''
+
+    candidate = raw_url.strip()
+
+    # DuckDuckGo often returns relative redirect links like /l/?uddg=<encoded-url>
+    if candidate.startswith('/'):
+        candidate = urljoin('https://duckduckgo.com', candidate)
+    elif candidate.startswith('//'):
+        candidate = f'https:{candidate}'
+
+    # Resolve redirect wrappers (including nested wrappers) up to a small depth.
+    for _ in range(3):
+        parsed = urlparse(candidate)
+        query_params = parse_qs(parsed.query)
+        uddg_values = query_params.get('uddg') or []
+        if not uddg_values:
+            break
+
+        resolved = unquote(uddg_values[0]).strip()
+        if not resolved:
+            break
+        if resolved.startswith('//'):
+            resolved = f'https:{resolved}'
+        elif resolved.startswith('/'):
+            resolved = urljoin('https://duckduckgo.com', resolved)
+        candidate = resolved
+
+    # If there is no scheme, treat it as https URL.
+    parsed_final = urlparse(candidate)
+    if not parsed_final.scheme and parsed_final.netloc:
+        return f'https://{candidate}'
+    if not parsed_final.scheme and parsed_final.path.startswith('www.'):
+        return f'https://{candidate}'
+
+    return candidate
 
 
 def ddg_search(query: str, max_results: int = 3, timeout: int = 10) -> List[Dict[str, str]]:
@@ -81,7 +122,9 @@ def _extract_search_results(soup: BeautifulSoup, max_results: int) -> List[Dict[
             link_elem = result_elem.select_one('.result__a')
             if not link_elem or 'href' not in link_elem.attrs:
                 continue
-            url = link_elem['href']
+            url = normalize_result_url(link_elem['href'])
+            if not url:
+                continue
             
             # Extract snippet
             snippet_elem = result_elem.select_one('.result__snippet')
@@ -114,3 +157,7 @@ def search_stock_info(ticker: str, topic: str = "", max_results: int = 3) -> Lis
     """
     query = f"{ticker} stock {topic}".strip()
     return ddg_search(query, max_results)
+
+
+# Backward-compatible alias for any existing imports.
+_normalize_result_url = normalize_result_url

@@ -38,6 +38,9 @@ class Config:
     # Cache settings
     ENABLE_CACHE = os.getenv('ENABLE_CACHE', 'True').lower() == 'true'
     CACHE_TTL = int(os.getenv('CACHE_TTL', '300'))  # 5 minutes
+    MARKET_OVERVIEW_PRELOAD = os.getenv('MARKET_OVERVIEW_PRELOAD', 'True').lower() == 'true'
+    MARKET_OVERVIEW_CACHE_SECONDS = int(os.getenv('MARKET_OVERVIEW_CACHE_SECONDS', '120'))
+    MARKET_OVERVIEW_REFRESH_SECONDS = int(os.getenv('MARKET_OVERVIEW_REFRESH_SECONDS', '90'))
     
     @classmethod
     def validate(cls) -> bool:
