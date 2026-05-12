@@ -10,8 +10,10 @@ __pycache__/
 dist/
 build/
 .venv/
+.venv-1/
 venv/
 ENV/
+.pytest_cache/
 
 # HuggingFace models and cache (FinBERT)
 .cache/
@@ -55,5 +57,10 @@ Thumbs.db
 
 # Logs
 *.log
+app.log
+app_output.log
 logs/
+
+# Local runtime/test artifacts
+temp/
 

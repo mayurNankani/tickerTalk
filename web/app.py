@@ -13,7 +13,11 @@ from services import LLMService, StockAnalysisService, FormattingService
 from services.agent_tools import ToolExecutor
 from services.agent_service import AgentService
 from routes.stock_routes import init_stock_routes
-from routes.api_routes import init_api_routes
+from routes.api_routes import (
+    init_api_routes,
+    start_market_overview_refresh_worker,
+    warm_market_overview_cache,
+)
 
 
 def create_app(config_object=None):
@@ -59,6 +63,26 @@ def create_app(config_object=None):
     
     app.register_blueprint(stock_bp)
     app.register_blueprint(api_bp)
+
+    if config_object.MARKET_OVERVIEW_PRELOAD:
+        should_start_background_worker = (
+            not config_object.DEBUG or os.environ.get('WERKZEUG_RUN_MAIN') == 'true'
+        )
+        if should_start_background_worker:
+            warm_market_overview_cache(
+                stock_service,
+                cache_seconds=config_object.MARKET_OVERVIEW_CACHE_SECONDS,
+            )
+            started = start_market_overview_refresh_worker(
+                stock_service,
+                cache_seconds=config_object.MARKET_OVERVIEW_CACHE_SECONDS,
+                refresh_interval_seconds=config_object.MARKET_OVERVIEW_REFRESH_SECONDS,
+            )
+            if started:
+                print(
+                    "[INFO] Market overview background refresh started "
+                    f"(every {config_object.MARKET_OVERVIEW_REFRESH_SECONDS}s)."
+                )
     
     return app
 

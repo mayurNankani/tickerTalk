@@ -15,7 +15,7 @@ from repositories.stock_repository import IStockRepository
 from services.llm_service import LLMService
 from services.formatting_service import FormattingService
 from src.tools.article_scraper import fetch_article_text
-from src.tools.web_search import ddg_search
+from src.tools.web_search import ddg_search, normalize_result_url
 
 
 _COMPARISON_SKIP_WORDS = {
@@ -256,7 +256,7 @@ class QueryService:
         links = []
         for i, result in enumerate(results[:5], 1):
             title = result.get('title', 'Source')
-            url = result.get('url', '#')
+            url = normalize_result_url(result.get('url', '#'))
             snippet = result.get('snippet', '')
             
             # Show snippet as preview without LLM summarization

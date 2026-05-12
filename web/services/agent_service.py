@@ -25,6 +25,7 @@ from typing import Any, Dict, List
 from services.llm_service import LLMService
 from services.agent_tools import TOOL_SCHEMAS, ToolExecutor
 from services.formatting_service import FormattingService
+from src.tools.web_search import normalize_result_url
 
 
 def _build_tool_descriptions() -> str:
@@ -134,11 +135,16 @@ class AgentService:
             print(f"[Agent iter={iteration}] response: {raw[:300]!r}")
 
             match = _TOOL_CALL_RE.search(raw)
-            if not match:
+            plain_call = self._parse_plain_tool_call(raw) if not match else None
+
+            if not match and not plain_call:
                 reply = _TOOL_CALL_RE.sub("", raw).strip()
                 # Guardrail: if the model skipped tools for an analysis request,
                 # force the rich analysis flow so UI cards (chart + heatmap) render.
-                if not analysis_html and self._looks_like_full_analysis_request(user_message):
+                if not analysis_html and (
+                    self._looks_like_full_analysis_request(user_message)
+                    or self._looks_like_symbol_only_request(user_message)
+                ):
                     forced = self._force_full_analysis(user_message, conversation_history)
                     if forced:
                         tool_updates.extend(forced.get("tool_updates", []))
@@ -155,19 +161,34 @@ class AgentService:
                             reply = f"I ran a full analysis for <b>{parsed.get('ticker', '')}</b>. See the detailed recommendation card below."
                 if not analysis_html:
                     reply = self._rewrite_generic_followup(reply, user_message, conversation_history)
+                if self._looks_like_deal_news_query(user_message) and not citations:
+                    fallback_citations = self._fetch_fallback_web_citations(user_message, conversation_history)
+                    if fallback_citations:
+                        citations.extend(fallback_citations)
+                        tool_updates.append("🌐 Added source links...")
                 reply = self._append_citations_html(reply, citations)
                 return {"tool_updates": tool_updates, "reply": reply, "analysis_html": analysis_html}
 
-            json_str = match.group(1).strip()
-            try:
-                call = json.loads(json_str)
-            except json.JSONDecodeError as e:
-                print(f"[Agent] Bad tool call JSON: {json_str!r} - {e}")
-                reply = _TOOL_CALL_RE.sub("", raw).strip() or "I ran into an issue. Please rephrase."
-                return {"tool_updates": tool_updates, "reply": reply, "analysis_html": analysis_html}
+            if match:
+                json_str = match.group(1).strip()
+                try:
+                    call = json.loads(json_str)
+                except json.JSONDecodeError as e:
+                    print(f"[Agent] Bad tool call JSON: {json_str!r} - {e}")
+                    reply = _TOOL_CALL_RE.sub("", raw).strip() or "I ran into an issue. Please rephrase."
+                    return {"tool_updates": tool_updates, "reply": reply, "analysis_html": analysis_html}
+            else:
+                call = plain_call
 
             tool_name = call.get("name", "")
             args = call.get("args", {})
+
+            explicit_ticker = self._extract_explicit_ticker(user_message)
+            if explicit_ticker:
+                if tool_name == "resolve_ticker":
+                    args = {**args, "company_name": explicit_ticker}
+                elif tool_name == "run_full_analysis":
+                    args = {**args, "ticker": explicit_ticker}
 
             # Safety net: if the LLM mangled the ticker in resolve_ticker,
             # replace it with the best matching token from the original message.
@@ -207,14 +228,21 @@ class AgentService:
                     pass
 
             tool_context.append(f"[Tool result for {tool_name}]\n{result_str}\n")
-            prompt = prompt + "\n" + _TOOL_CALL_RE.sub("", raw).strip()
+            assistant_text = _TOOL_CALL_RE.sub("", raw).strip()
+            if plain_call and not match:
+                assistant_text = ""
+            if assistant_text:
+                prompt = prompt + "\n" + assistant_text
 
         final_prompt = (
             prompt + "\n" + "\n".join(tool_context)
             + "\n[Assistant]\nPlease summarize the above data in a helpful response."
         )
         reply = self.llm.generate_raw(final_prompt, model_key)
-        if not analysis_html and self._looks_like_full_analysis_request(user_message):
+        if not analysis_html and (
+            self._looks_like_full_analysis_request(user_message)
+            or self._looks_like_symbol_only_request(user_message)
+        ):
             forced = self._force_full_analysis(user_message, conversation_history)
             if forced:
                 tool_updates.extend(forced.get("tool_updates", []))
@@ -231,12 +259,73 @@ class AgentService:
                     reply = f"I ran a full analysis for <b>{parsed.get('ticker', '')}</b>. See the detailed recommendation card below."
         if not analysis_html:
             reply = self._rewrite_generic_followup(reply, user_message, conversation_history)
+        if self._looks_like_deal_news_query(user_message) and not citations:
+            fallback_citations = self._fetch_fallback_web_citations(user_message, conversation_history)
+            if fallback_citations:
+                citations.extend(fallback_citations)
+                tool_updates.append("🌐 Added source links...")
         reply = self._append_citations_html(reply, citations)
         return {
             "tool_updates": tool_updates,
             "reply": _TOOL_CALL_RE.sub("", reply).strip(),
             "analysis_html": analysis_html,
         }
+
+    def _parse_plain_tool_call(self, raw: str) -> Dict[str, Any] | None:
+        """Parse unwrapped JSON tool calls returned as plain text/code-fenced JSON."""
+        text = (raw or "").strip()
+        if not text:
+            return None
+
+        # Support generic JSON fences: ```json { ... } ```
+        text = re.sub(r"^```(?:json)?\s*", "", text, flags=re.IGNORECASE)
+        text = re.sub(r"\s*```$", "", text)
+
+        candidates = [text]
+        first_brace = text.find("{")
+        last_brace = text.rfind("}")
+        if first_brace != -1 and last_brace != -1 and first_brace < last_brace:
+            candidates.append(text[first_brace:last_brace + 1])
+
+        data = None
+        for candidate in candidates:
+            candidate = candidate.strip()
+            if not (candidate.startswith("{") and candidate.endswith("}")):
+                continue
+            try:
+                data = json.loads(candidate)
+                break
+            except Exception:
+                continue
+
+        if data is None:
+            return None
+
+        if not isinstance(data, dict):
+            return None
+
+        if not isinstance(data.get("name"), str):
+            return None
+
+        args = data.get("args", {})
+        if args is None:
+            args = {}
+        if not isinstance(args, dict):
+            return None
+
+        return {"name": data["name"], "args": args}
+
+    def _looks_like_symbol_only_request(self, user_message: str) -> bool:
+        """Treat bare ticker-style prompts (e.g. AAPL) as direct analysis requests."""
+        text = (user_message or "").strip()
+        if not text or " " in text:
+            return False
+
+        upper = text.upper()
+        if upper in _TICKER_NOISE or upper.lower() in _SKIP_WORDS:
+            return False
+
+        return bool(re.fullmatch(r"\^?[A-Z0-9\.-]{1,10}", upper))
 
     def _looks_like_full_analysis_request(self, user_message: str) -> bool:
         """Detect explicit recommendation-style requests for the full analysis card."""
@@ -350,13 +439,21 @@ class AgentService:
 
     def _force_full_analysis(self, user_message: str, conversation_history: List[Dict[str, str]]) -> Dict[str, Any] | None:
         """Run resolve_ticker + run_full_analysis when LLM skipped tool usage."""
-        ticker = self._extract_ticker_from_history(conversation_history)
+        ticker = ""
         tool_updates: List[str] = []
 
-        if ticker:
-            tool_updates.append(f"🔎 Reusing last discussed ticker {ticker}...")
-        else:
-            # First try with exactly what user typed (matches prompt contract).
+        # 1) Prioritize explicit ticker-like token in the current user message.
+        tokens = _TICKER_TOKEN_RE.findall(user_message or "")
+        for token in tokens:
+            token_u = token.upper()
+            if token.lower() in _SKIP_WORDS or token_u in _TICKER_NOISE:
+                continue
+            if len(token_u) >= 2 and len(token_u) <= 6:
+                ticker = token_u
+                break
+
+        # 2) If no explicit ticker token found, resolve from full message text.
+        if not ticker:
             resolve_str, resolve_label = self.executor.execute(
                 "resolve_ticker", {"company_name": user_message}
             )
@@ -368,15 +465,11 @@ class AgentService:
             except Exception:
                 ticker = ""
 
-            # Fallback: pick first ticker-like token from the original message.
-            if not ticker:
-                tokens = _TICKER_TOKEN_RE.findall(user_message)
-                for token in tokens:
-                    token_u = token.upper()
-                    if token.lower() in _SKIP_WORDS:
-                        continue
-                    ticker = token_u
-                    break
+        # 3) Final fallback: reuse history ticker only when user did not specify one.
+        if not ticker:
+            ticker = self._extract_ticker_from_history(conversation_history)
+            if ticker:
+                tool_updates.append(f"🔎 Reusing last discussed ticker {ticker}...")
 
         if not ticker:
             return None
@@ -675,7 +768,7 @@ class AgentService:
             for item in data.get("articles", [])[:5]:
                 if not isinstance(item, dict):
                     continue
-                url = (item.get("url") or "").strip()
+                url = normalize_result_url((item.get("url") or "").strip())
                 title = (item.get("headline") or "Source").strip()
                 source = (item.get("source") or "Finnhub").strip()
                 if url:
@@ -685,7 +778,7 @@ class AgentService:
             for item in data.get("results", [])[:5]:
                 if not isinstance(item, dict):
                     continue
-                url = (item.get("url") or "").strip()
+                url = normalize_result_url((item.get("url") or "").strip())
                 title = (item.get("title") or "Source").strip()
                 if url:
                     citations.append({"title": title, "url": url, "source": "Web"})
@@ -700,11 +793,11 @@ class AgentService:
         seen = set()
         unique: List[Dict[str, str]] = []
         for item in citations:
-            url = (item.get("url") or "").strip()
+            url = normalize_result_url((item.get("url") or "").strip())
             if not url or url in seen:
                 continue
             seen.add(url)
-            unique.append(item)
+            unique.append({**item, "url": url})
 
         if not unique:
             return reply
@@ -724,6 +817,30 @@ class AgentService:
             return body
         return body + citations_html
 
+    def _looks_like_deal_news_query(self, user_message: str) -> bool:
+        """Detect acquisition/deal/news intents that should include source links."""
+        text = (user_message or "").lower()
+        terms = (
+            "acquisition", "acquire", "merger", "m&a", "deal", "agreement",
+            "headline", "headlines", "news", "article", "articles", "report",
+            "source", "sources",
+        )
+        return any(term in text for term in terms)
+
+    def _fetch_fallback_web_citations(
+        self,
+        user_message: str,
+        conversation_history: List[Dict[str, str]],
+    ) -> List[Dict[str, str]]:
+        """Fetch web_search citations when the model answers without source tools."""
+        anchor = self._extract_ticker_from_history(conversation_history)
+        query = f"{anchor} {user_message}".strip() if anchor else user_message
+        try:
+            result_str, _ = self.executor.execute("web_search", {"query": query})
+            return self._extract_citations("web_search", result_str)
+        except Exception:
+            return []
+
     def _correct_ticker_arg(self, args: Dict, user_message: str) -> Dict:
         """If the LLM's company_name looks mangled vs the original user message,
         replace it with the closest matching token from the user's input."""
@@ -732,6 +849,11 @@ class AgentService:
         candidates = [t.upper() for t in tokens if t.lower() not in _SKIP_WORDS]
         if not candidates:
             return args
+        # If user provided exactly one clear ticker-like token, trust it.
+        if len(candidates) == 1 and llm_name != candidates[0]:
+            forced = candidates[0]
+            print(f"[Agent] Corrected ticker arg (explicit): {llm_name!r} -> {forced!r}")
+            return {**args, "company_name": forced}
         # Exact match — LLM got it right
         if llm_name in candidates:
             return args
@@ -751,6 +873,17 @@ class AgentService:
             return {**args, "company_name": best}
         # 3. No match found — keep original
         return args
+
+    def _extract_explicit_ticker(self, user_message: str) -> str:
+        """Extract a single explicit ticker token from user input, if present."""
+        tokens = _TICKER_TOKEN_RE.findall(user_message or "")
+        candidates = [t.upper() for t in tokens if t.lower() not in _SKIP_WORDS and t.upper() not in _TICKER_NOISE]
+        if not candidates:
+            return ""
+        # If multiple are present, avoid forcing to prevent harming comparison flows.
+        if len(candidates) == 1:
+            return candidates[0]
+        return ""
 
     def _build_analysis_html(self, result_data: Dict, ticker: str) -> str:
         recs = result_data.get("recommendations", {}) or {}
