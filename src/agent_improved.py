@@ -171,6 +171,75 @@ class StockAnalysisAgentImproved:
         # For now, use default weights
         return SECTOR_WEIGHTS["default"]
 
+    def _reason_items(self, summary: str) -> list[str]:
+        """Split component summary into individual reason items."""
+        text = (summary or "").strip()
+        if not text:
+            return []
+        return [item.strip() for item in text.split(",") if item.strip()]
+
+    def _select_horizon_items(self, section: str, horizon: str, summary: str) -> str:
+        """Pick the most relevant subset of reason items for the requested horizon."""
+        items = self._reason_items(summary)
+        if not items:
+            return ""
+
+        if section == "fundamental" and horizon == "medium":
+            # Medium term should lean toward valuation + growth/execution.
+            return ", ".join(items[:2])
+
+        if section == "fundamental" and horizon == "long":
+            # Long term should lean toward durability/quality first.
+            quality_terms = (
+                "debt", "liquidity", "margin", "roe", "book value", "current ratio"
+            )
+            quality_items = [item for item in items if any(term in item.lower() for term in quality_terms)]
+            chosen = quality_items[:2] or items[-2:]
+            return ", ".join(chosen)
+
+        if section == "technical" and horizon == "medium":
+            # Medium term should favor actionable momentum/trend confirmation.
+            medium_terms = ("macd", "rsi", "adx", "sma20", "sma50", "stochastic", "mfi")
+            medium_items = [item for item in items if any(term in item.lower() for term in medium_terms)]
+            chosen = medium_items[:2] or items[:2]
+            return ", ".join(chosen)
+
+        if section == "technical" and horizon == "long":
+            # Long term should favor structural trend markers.
+            long_terms = ("sma200", "golden cross", "major golden cross", "long-term uptrend", "long-term downtrend")
+            long_items = [item for item in items if any(term in item.lower() for term in long_terms)]
+            return ", ".join(long_items[:2])
+
+        if section == "sentiment" and horizon == "medium":
+            return ", ".join(items[:1])
+
+        return ", ".join(items)
+
+    def _horizon_reason(self, section: str, horizon: str, summary: str) -> str:
+        """Wrap component summaries with horizon-specific framing so each horizon reads differently."""
+        text = self._select_horizon_items(section, horizon, summary)
+        if not text:
+            return ""
+
+        if section == "technical" and horizon == "short":
+            return f"Near-term momentum setup: {text}"
+        if section == "sentiment" and horizon == "short":
+            return f"News-driven catalyst bias (1-4 weeks): {text}"
+
+        if section == "fundamental" and horizon == "medium":
+            return f"Fundamental setup for the next quarter: {text}"
+        if section == "technical" and horizon == "medium":
+            return f"Trend confirmation over the next few months: {text}"
+        if section == "sentiment" and horizon == "medium":
+            return f"Sentiment tailwind/headwind for medium term: {text}"
+
+        if section == "fundamental" and horizon == "long":
+            return f"Long-horizon business quality and valuation: {text}"
+        if section == "technical" and horizon == "long":
+            return f"Primary trend structure for 6-12 months: {text}"
+
+        return text
+
     def get_fundamental_recommendation(self, fundamental_data: Dict[str, Any]) -> Dict[str, Any]:
         """
         Generate recommendation based on fundamental analysis using weighted, continuous scoring.
@@ -807,6 +876,23 @@ class StockAnalysisAgentImproved:
             
             # Fetch news articles
             news_result = self.news_agent.fetch(ticker, max_items=5, days_back=7)
+
+            # Preserve concrete adapter errors so users can diagnose configuration issues.
+            news_error = (getattr(news_result, 'error', '') or '').strip() if news_result else ''
+            if news_error:
+                if 'api key' in news_error.lower() or 'finnhub' in news_error.lower():
+                    return {
+                        "label": "NEUTRAL",
+                        "summary": "Sentiment unavailable (Finnhub API key not configured)",
+                        "score": 50,
+                        "confidence": 0
+                    }
+                return {
+                    "label": "NEUTRAL",
+                    "summary": f"Sentiment unavailable ({news_error})",
+                    "score": 50,
+                    "confidence": 0
+                }
             
             # Check if news fetch was successful
             if not news_result or not news_result.data or not news_result.data.get('news'):
@@ -895,10 +981,12 @@ class StockAnalysisAgentImproved:
             short_label = "STRONG SELL"
         
         short_summary_parts = []
-        if technical_rec.get('summary'):
-            short_summary_parts.append(f"Technical: {technical_rec['summary']}")
-        if sentiment_rec.get('summary'):
-            short_summary_parts.append(f"Sentiment: {sentiment_rec['summary']}")
+        short_tech = self._horizon_reason("technical", "short", technical_rec.get('summary', ''))
+        short_sent = self._horizon_reason("sentiment", "short", sentiment_rec.get('summary', ''))
+        if short_tech:
+            short_summary_parts.append(f"Technical: {short_tech}")
+        if short_sent:
+            short_summary_parts.append(f"Sentiment: {short_sent}")
         
         short_term = {
             "label": short_label,
@@ -924,12 +1012,15 @@ class StockAnalysisAgentImproved:
             medium_label = "STRONG SELL"
         
         medium_summary_parts = []
-        if fundamental_rec.get('summary'):
-            medium_summary_parts.append(f"Fundamentals: {fundamental_rec['summary']}")
-        if technical_rec.get('summary'):
-            medium_summary_parts.append(f"Technical: {technical_rec['summary']}")
-        if sentiment_rec.get('summary'):
-            medium_summary_parts.append(f"Sentiment: {sentiment_rec['summary']}")
+        medium_fund = self._horizon_reason("fundamental", "medium", fundamental_rec.get('summary', ''))
+        medium_tech = self._horizon_reason("technical", "medium", technical_rec.get('summary', ''))
+        medium_sent = self._horizon_reason("sentiment", "medium", sentiment_rec.get('summary', ''))
+        if medium_fund:
+            medium_summary_parts.append(f"Fundamentals: {medium_fund}")
+        if medium_tech:
+            medium_summary_parts.append(f"Technical: {medium_tech}")
+        if medium_sent:
+            medium_summary_parts.append(f"Sentiment: {medium_sent}")
         
         medium_term = {
             "label": medium_label,
@@ -955,11 +1046,13 @@ class StockAnalysisAgentImproved:
             long_label = "STRONG SELL"
         
         long_summary_parts = []
-        if fundamental_rec.get('summary'):
-            long_summary_parts.append(f"Fundamentals: {fundamental_rec['summary']}")
+        long_fund = self._horizon_reason("fundamental", "long", fundamental_rec.get('summary', ''))
+        long_tech = self._horizon_reason("technical", "long", technical_rec.get('summary', ''))
+        if long_fund:
+            long_summary_parts.append(f"Fundamentals: {long_fund}")
         # Include key technical trend indicators for long-term
-        if technical_rec.get('summary'):
-            long_summary_parts.append(f"Technical: {technical_rec['summary']}")
+        if long_tech:
+            long_summary_parts.append(f"Technical: {long_tech}")
         
         long_term = {
             "label": long_label,

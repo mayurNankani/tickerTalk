@@ -3,10 +3,11 @@ Formatting Service
 HTML formatting utilities for stock analysis display
 """
 
+import os
 import re
 import time
 from datetime import datetime
-from typing import Dict, Any
+from typing import Dict, Any, List
 from src.tools.web_search import normalize_result_url
 
 
@@ -68,6 +69,33 @@ class FormattingService:
             return f'No strong {section} signals detected.'
 
         return text
+
+    @staticmethod
+    def _parse_summary_sections(summary_text: str) -> Dict[str, str]:
+        """Parse 'Fundamental(s): ... | Technical: ... | Sentiment: ...' summary text.
+        Accepts both Fundamental and Fundamentals prefixes and is case-insensitive."""
+        parsed = {"fundamental": "", "technical": "", "sentiment": ""}
+        text = (summary_text or "").strip()
+        if not text:
+            return parsed
+
+        for part in text.split('|'):
+            chunk = part.strip()
+            if not chunk:
+                continue
+            m = re.match(r'^(fundamental(?:s)?|technical|sentiment)\s*:\s*(.+)$', chunk, flags=re.IGNORECASE)
+            if not m:
+                continue
+            key = m.group(1).lower()
+            value = m.group(2).strip()
+            if key.startswith('fundamental'):
+                parsed['fundamental'] = value
+            elif key == 'technical':
+                parsed['technical'] = value
+            elif key == 'sentiment':
+                parsed['sentiment'] = value
+
+        return parsed
     
     @staticmethod
     def add_tooltips(text: str) -> str:
@@ -94,6 +122,28 @@ class FormattingService:
         
         bullets = ''.join(f'<li>{item}</li>' for item in items)
         return f'<ul>{bullets}</ul>'
+
+    @staticmethod
+    def _split_reason_items(text: str) -> List[str]:
+        """Split reason text into bullet-friendly items using common separators."""
+        raw = (text or '').strip()
+        if not raw:
+            return []
+        # Keep parsing lightweight and deterministic for UI output.
+        pieces = re.split(r'\s*(?:,|;|\|)\s*', raw)
+        return [p.strip() for p in pieces if p.strip()]
+
+    @staticmethod
+    def _horizon_section_order(term: str) -> List[str]:
+        """Order sections by horizon importance to keep quick reasons concise."""
+        t = (term or '').lower()
+        if 'short-term' in t:
+            return ['technical', 'sentiment', 'fundamental']
+        if 'medium-term' in t:
+            return ['fundamental', 'technical', 'sentiment']
+        if 'long-term' in t:
+            return ['fundamental', 'technical', 'sentiment']
+        return ['fundamental', 'technical', 'sentiment']
     
     @staticmethod
     def heatmap(label: str) -> str:
@@ -117,37 +167,49 @@ class FormattingService:
     
     def expand_block(self, term: str, label: str, bar: str, bullets: str, idx: int, 
                      fundamental_summary: str = None, technical_summary: str = None, sentiment_summary: str = None) -> str:
-        """Create expandable recommendation section with separate fundamental, technical, and sentiment reasons"""
+        """Create recommendation section with visible horizon reasons."""
         
-        sections = []
-        
-        if fundamental_summary:
-            fund_bullets = self.to_bullets(self.add_tooltips(fundamental_summary))
-            sections.append(f'<div class="reason-group reason-fundamental"><span class="reason-group-label">Fundamental</span>{fund_bullets}</div>')
-        
-        if technical_summary:
-            tech_bullets = self.to_bullets(self.add_tooltips(technical_summary))
-            sections.append(f'<div class="reason-group reason-technical"><span class="reason-group-label">Technical</span>{tech_bullets}</div>')
-        
-        if sentiment_summary:
-            sentiment_bullets = self.to_bullets(self.add_tooltips(sentiment_summary))
-            sections.append(f'<div class="reason-group reason-sentiment"><span class="reason-group-label">Sentiment</span>{sentiment_bullets}</div>')
-        
-        # Build reasons HTML
-        reasons_html = (
-            f'<div class="reasons-body">{" ".join(sections)}</div>'
-            if sections else
-            f'<div class="reasons-body">{bullets}</div>'
-        )
-        
+        section_data = {
+            'fundamental': (fundamental_summary or '').strip(),
+            'technical': (technical_summary or '').strip(),
+            'sentiment': (sentiment_summary or '').strip(),
+        }
+
+        section_item_limit = {
+            'technical': 4,
+            'fundamental': 3,
+            'sentiment': 2,
+        }
+
+        # Preview reasons: show compact bullet points for each section.
+        preview_blocks: List[str] = []
+        for key in self._horizon_section_order(term):
+            text = section_data.get(key, '')
+            if not text:
+                continue
+            title = key.capitalize()
+            items = self._split_reason_items(text)
+            if not items:
+                continue
+            trimmed_items = items[:section_item_limit.get(key, 3)]
+            bullets = ''.join(f'<li>{self.add_tooltips(item)}</li>' for item in trimmed_items)
+            preview_blocks.append(
+                f'<div class="reason-preview reason-preview-{key}">'
+                f'<span class="reason-preview-label">{title}</span>'
+                f'<ul class="reason-preview-list">{bullets}</ul>'
+                f'</div>'
+            )
+
+        if preview_blocks:
+            quick_html = f'<div class="reasons-preview">{"".join(preview_blocks)}</div>'
+        else:
+            quick_html = f'<div class="reasons-body">{bullets}</div>'
+
         return f'''
         <div class="rec-row">
-            <div>
+            <div class="rec-main">
                 <div class="rec-label">{term}</div>
-                <details class="rec-details">
-                    <summary>Reasons</summary>
-                    {reasons_html}
-                </details>
+                {quick_html}
             </div>
             {bar}
         </div>
@@ -219,8 +281,8 @@ class FormattingService:
             return fallback
     
     def _format_logo(self, ticker: str) -> str:
-        """Format company logo using Finnhub logo API"""
-        logo_url = f"https://finnhub.io/api/logo?symbol={ticker}"
+        """Format company logo via the server-side proxy endpoint."""
+        logo_url = f"/api/logo/{ticker}"
         return (
             f'<img src="{logo_url}" alt="{ticker}" class="stock-logo" '
             f'onerror="this.style.display=\'none\'"/>'
@@ -304,7 +366,7 @@ class FormattingService:
                 </span>
             </span>
             <button class="toggle-chart-btn" data-chart-id="{chart_id}" data-ticker="{ticker}">
-                <span id="btn_{chart_id}">Show Chart ▼</span>
+                <span id="btn_{chart_id}">Chart</span>
             </button>
         </div>
         <div id="{chart_id}" class="chart-container" style="display:none;">
@@ -393,13 +455,9 @@ class FormattingService:
         short_sentiment = ''
         
         if '|' in short_summary:
-            parts = short_summary.split('|')
-            for part in parts:
-                part = part.strip()
-                if part.startswith('Technical:'):
-                    short_tech = part.replace('Technical:', '').strip()
-                elif part.startswith('Sentiment:'):
-                    short_sentiment = part.replace('Sentiment:', '').strip()
+            short_parts = self._parse_summary_sections(short_summary)
+            short_tech = short_parts.get('technical', '')
+            short_sentiment = short_parts.get('sentiment', '')
 
         short_tech = self._clean_reason_summary(short_tech or short_summary, 'technical')
         short_sentiment = self._clean_reason_summary(short_sentiment, 'sentiment')
@@ -411,15 +469,10 @@ class FormattingService:
         medium_sentiment = ''
         
         if '|' in medium_summary:
-            parts = medium_summary.split('|')
-            for part in parts:
-                part = part.strip()
-                if part.startswith('Fundamentals:'):
-                    medium_fund = part.replace('Fundamentals:', '').strip()
-                elif part.startswith('Technical:'):
-                    medium_tech = part.replace('Technical:', '').strip()
-                elif part.startswith('Sentiment:'):
-                    medium_sentiment = part.replace('Sentiment:', '').strip()
+            medium_parts = self._parse_summary_sections(medium_summary)
+            medium_fund = medium_parts.get('fundamental', '')
+            medium_tech = medium_parts.get('technical', '')
+            medium_sentiment = medium_parts.get('sentiment', '')
 
         if not (medium_fund or medium_tech or medium_sentiment) and medium_summary:
             medium_tech = medium_summary
@@ -435,15 +488,10 @@ class FormattingService:
         long_sentiment = ''
         
         if '|' in long_summary:
-            parts = long_summary.split('|')
-            for part in parts:
-                part = part.strip()
-                if part.startswith('Fundamentals:'):
-                    long_fund = part.replace('Fundamentals:', '').strip()
-                elif part.startswith('Technical:'):
-                    long_tech = part.replace('Technical:', '').strip()
-                elif part.startswith('Sentiment:'):
-                    long_sentiment = part.replace('Sentiment:', '').strip()
+            long_parts = self._parse_summary_sections(long_summary)
+            long_fund = long_parts.get('fundamental', '')
+            long_tech = long_parts.get('technical', '')
+            long_sentiment = long_parts.get('sentiment', '')
 
         if not (long_fund or long_tech or long_sentiment) and long_summary:
             long_tech = long_summary
@@ -485,7 +533,19 @@ class FormattingService:
             )
         ]
         
-        return f"<div class='rec-section'><div class='rec-section-title'>Time Horizon Recommendations</div>{''.join(blocks)}</div>"
+        risk_note = (
+            "<div class='horizon-risk-note'>"
+            "Signals can change quickly after earnings releases, guidance updates, and macro shocks."
+            "</div>"
+        )
+
+        return (
+            "<div class='rec-section'>"
+            "<div class='rec-section-title'>Time Horizon Recommendations</div>"
+            f"{''.join(blocks)}"
+            f"{risk_note}"
+            "</div>"
+        )
     
     @staticmethod
     def format_earnings_html(ticker: str, data: Dict) -> str:
@@ -521,3 +581,198 @@ class FormattingService:
             html += "</tbody></table>"
         
         return html
+
+    @staticmethod
+    def format_comparison_price(quote: Any) -> str:
+        """Format price text for comparison table, handling multiple quote shapes."""
+        if not isinstance(quote, dict):
+            return 'N/A'
+
+        qdata = quote.get('data') if isinstance(quote.get('data'), dict) else quote
+        if not isinstance(qdata, dict):
+            return 'N/A'
+
+        raw_price = qdata.get('price')
+        if raw_price is None:
+            raw_price = qdata.get('currentPrice')
+
+        currency = qdata.get('currency', '')
+        try:
+            price_val = float(raw_price)
+            if currency:
+                return f"${price_val:,.2f} {currency}"
+            return f"${price_val:,.2f}"
+        except Exception:
+            return str(raw_price) if raw_price not in (None, '') else 'N/A'
+
+    def format_stock_comparison(self, analyses: List[Any]) -> str:
+        """Build a side-by-side stock comparison HTML block."""
+        cards = []
+        rows = []
+
+        for analysis in analyses[:2]:
+            card_html = self.format_analysis_html(analysis)
+            cards.append(f"<div class='comparison-card'>{card_html}</div>")
+
+            recs = getattr(analysis, 'recommendations', {}) or {}
+            short = recs.get('short_term', {}) or {}
+            medium = recs.get('medium_term', {}) or {}
+            long_ = recs.get('long_term', {}) or {}
+            price_text = self.format_comparison_price(getattr(analysis, 'quote', None))
+            rows.append(
+                "<tr>"
+                f"<td><b>{getattr(analysis, 'ticker', 'N/A')}</b></td>"
+                f"<td>{getattr(analysis, 'company_name', 'N/A')}</td>"
+                f"<td>{price_text}</td>"
+                f"<td>{short.get('label', 'N/A')}</td>"
+                f"<td>{medium.get('label', 'N/A')}</td>"
+                f"<td>{long_.get('label', 'N/A')}</td>"
+                "</tr>"
+            )
+
+        return (
+            "<div class='comparison-section stock-card'>"
+            "<div class='stock-card-header'>"
+            "<div>"
+            "<div class='stock-name'>Stock Comparison</div>"
+            "<div class='stock-price-line'>Side-by-side analysis of the requested stocks.</div>"
+            "</div>"
+            "</div>"
+            "<div class='comparison-summary'>"
+            "<table class='comparison-table'>"
+            "<thead><tr><th>Ticker</th><th>Company</th><th>Price</th><th>Short</th><th>Medium</th><th>Long</th></tr></thead>"
+            f"<tbody>{''.join(rows)}</tbody>"
+            "</table>"
+            "</div>"
+            f"<div class='comparison-grid'>{''.join(cards)}</div>"
+            "</div>"
+        )
+
+    def build_analysis_fallback_html(self, result_data: Dict, ticker: str) -> str:
+        """Build minimal analysis card when richer rendering is unavailable."""
+        recs = result_data.get("recommendations", {}) or {}
+        price = result_data.get("price")
+        currency = result_data.get("currency", "USD")
+        company = result_data.get("company_name", ticker)
+
+        def _badge(label: str) -> str:
+            label_u = (label or "N/A").upper()
+            class_map = {
+                "STRONG BUY": "badge-strong-buy",
+                "BUY": "badge-buy",
+                "HOLD": "badge-hold",
+                "SELL": "badge-sell",
+            }
+            icon_map = {
+                "STRONG BUY": "▲▲",
+                "BUY": "▲",
+                "HOLD": "◆",
+                "SELL": "▼",
+            }
+            css_class = class_map.get(label_u, "badge-na")
+            icon = icon_map.get(label_u, "—")
+            return f"<span class='badge {css_class}'>{icon} {label_u}</span>"
+
+        def _row(title: str, data: Dict) -> str:
+            label = data.get("label") or "N/A"
+            summary = data.get("summary") or "No summary available"
+            return (
+                f"<div class='rec-row'>"
+                f"<div>"
+                f"<div class='rec-label'>{title}</div>"
+                f"<div class='stock-price-line'>{summary}</div>"
+                f"</div>"
+                f"{_badge(label)}"
+                f"</div>"
+            )
+
+        price_text = "N/A"
+        if isinstance(price, (int, float)):
+            price_text = f"${price:,.2f} {currency}"
+
+        return (
+            f"<div class='analysis-block stock-card' data-ticker='{ticker}'>"
+            f"<div class='stock-card-header'>"
+            f"<div>"
+            f"<div class='stock-name'>{company}<span class='stock-ticker-badge'>{ticker}</span></div>"
+            f"<div class='stock-price-line'>{price_text}</div>"
+            f"</div>"
+            f"</div>"
+            f"<div class='rec-section'>"
+            f"<div class='rec-section-title'>Time Horizon Recommendations</div>"
+            f"{_row('Short-term (1 week)', recs.get('short_term', {}) or {})}"
+            f"{_row('Medium-term (3 months)', recs.get('medium_term', {}) or {})}"
+            f"{_row('Long-term (6-12 months)', recs.get('long_term', {}) or {})}"
+            f"</div>"
+            f"</div>"
+        )
+
+    def ensure_analysis_markup(self, result_data: Dict, ticker: str, analysis_html: str) -> str:
+        """Regenerate analysis HTML if a partial renderer dropped required card markup."""
+        if analysis_html and "badge-" in analysis_html and "rec-section-title" in analysis_html:
+            return analysis_html
+
+        try:
+            class _AnalysisFallback:
+                pass
+
+            analysis = _AnalysisFallback()
+            analysis.ticker = ticker
+            analysis.company_name = result_data.get("company_name", ticker)
+            analysis.quote = {
+                "data": {
+                    "price": result_data.get("price"),
+                    "currency": result_data.get("currency", "USD"),
+                    "name": result_data.get("company_name", ticker),
+                }
+            }
+            analysis.recommendations = result_data.get("recommendations", {}) or {}
+            analysis.news = {"news": []}
+            analysis.price_history = {"dates": [], "prices": []}
+
+            rendered = self.format_analysis_html(analysis)
+            if rendered and "badge-" in rendered and "rec-section-title" in rendered:
+                return rendered
+        except Exception:
+            pass
+
+        fallback = self.build_analysis_fallback_html(result_data, ticker)
+        if fallback and "stock-card" in fallback:
+            return fallback
+        return analysis_html
+
+    @staticmethod
+    def append_citations_html(reply: str, citations: List[Dict[str, str]]) -> str:
+        """Append unique clickable citations to the reply if available."""
+        if not citations:
+            return reply
+
+        seen = set()
+        unique: List[Dict[str, str]] = []
+        for item in citations:
+            url = normalize_result_url((item.get("url") or "").strip())
+            if not url or url in seen:
+                continue
+            seen.add(url)
+            unique.append({**item, "url": url})
+
+        if not unique:
+            return reply
+
+        links = []
+        for item in unique[:5]:
+            title = item.get("title", "Source")
+            source = item.get("source", "Source")
+            url = item.get("url", "#")
+            links.append(
+                f"<li><a href=\"{url}\" target=\"_blank\" rel=\"noopener\">{title}</a> "
+                f"<span style='color:#94a3b8;'>({source})</span></li>"
+            )
+
+        citations_html = "<br><br><b>Sources:</b><ul>" + "".join(links) + "</ul>"
+        body = (reply or "").strip()
+        if not body:
+            return citations_html
+        if "<b>Sources:</b>" in body:
+            return body
+        return body + citations_html

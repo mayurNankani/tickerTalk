@@ -49,11 +49,13 @@ def init_stock_routes(agent_service: AgentService, **_kwargs):
         # We use the session copy as source of truth, not the client copy,
         # to avoid injecting large HTML blobs back from the browser.
         conv_history: list = session.get('conversation_history', [])
+        last_analyzed_ticker: str = session.get('last_analyzed_ticker', '')
 
         result = agent_service.run(
             user_message=user_message,
             conversation_history=conv_history,
             model_key=model_key,
+            last_analyzed_ticker=last_analyzed_ticker,
         )
 
         reply: str = result.get('reply', '')
@@ -65,6 +67,11 @@ def init_stock_routes(agent_service: AgentService, **_kwargs):
         conv_history.append({'role': 'assistant', 'content': reply})
         # Keep last 20 turns to avoid session growth
         session['conversation_history'] = conv_history[-20:]
+
+        resolved_ticker = (result.get('last_analyzed_ticker') or '').upper().strip()
+        if resolved_ticker:
+            session['last_analyzed_ticker'] = resolved_ticker
+
         session.modified = True
 
         response_payload: dict[str, Any] = {

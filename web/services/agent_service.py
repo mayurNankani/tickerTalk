@@ -18,43 +18,18 @@ Response shape returned to the route:
 """
 from __future__ import annotations
 import json
-import os
 import re
 from typing import Any, Dict, List
 
 from services.llm_service import LLMService
-from services.agent_tools import TOOL_SCHEMAS, ToolExecutor
+from services.agent_prompts import build_chat_prompt, load_system_prompt
+from services.agent_tools import ToolExecutor
+from services.tool_schemas import TOOL_SCHEMAS
 from services.formatting_service import FormattingService
 from src.tools.web_search import normalize_result_url
 
-
-def _build_tool_descriptions() -> str:
-    lines = []
-    for t in TOOL_SCHEMAS:
-        fn = t["function"]
-        params = fn.get("parameters", {}).get("properties", {})
-        param_str = ", ".join(
-            f'{k} ({v.get("type", "any")}): {v.get("description", "")}'
-            for k, v in params.items()
-        )
-        lines.append(f'- {fn["name"]}: {fn["description"]}\n  Args: {param_str}')
-    return "\n".join(lines)
-
-
-def _load_system_prompt() -> str:
-    """Load agent system prompt from file, substituting tool descriptions."""
-    prompt_file = os.path.join(os.path.dirname(__file__), "..", "prompts", "agent_system.txt")
-    prompt_file = os.path.normpath(prompt_file)
-    try:
-        with open(prompt_file, "r", encoding="utf-8") as f:
-            template = f.read()
-        return template.replace("{tool_descriptions}", _build_tool_descriptions())
-    except FileNotFoundError:
-        # Inline fallback — should not happen in a correctly deployed app
-        raise RuntimeError(f"Agent system prompt not found at {prompt_file}")
-
 MAX_TOOL_ITERATIONS = 5
-_SYSTEM_PROMPT = _load_system_prompt()
+_SYSTEM_PROMPT = load_system_prompt(TOOL_SCHEMAS)
 _TOOL_CALL_RE = re.compile(r"<tool_call>(.*?)</tool_call>", re.DOTALL)
 _COMPARISON_SIGNAL_RE = re.compile(
     r'\b(compare|vs\.?|versus|against|better than|worse than|compared to|between|'
@@ -71,12 +46,35 @@ _SKIP_WORDS = {
     'any', 'all', 'out', 'get', 'use', 'run', 'new', 'old', 'long', 'term',
     'stock', 'share', 'price', 'about', 'with', 'from', 'into', 'than', 'more',
     'yes', 'y', 'yeah', 'yep', 'sure', 'ok', 'okay', 'please', 'full', 'analysis',
+    # Common question/sentence words that could be mistaken for tickers
+    'next', 'last', 'first', 'show', 'will', 'tell', 'give', 'does', 'then',
+    'even', 'just', 'also', 'date', 'time', 'soon', 'they', 'them', 'their',
+    'have', 'been', 'were', 'said', 'each', 'much', 'very', 'over', 'some',
+    'down', 'only', 'most', 'after', 'where', 'there', 'going', 'would', 'could',
+    'should', 'might', 'which', 'while', 'since', 'until', 'below', 'above',
+    'between', 'before', 'during', 'recent', 'latest', 'current',
+    'quarter', 'report', 'look', 'like', 'mean', 'know', 'think', 'want',
+    'earn', 'earnings', 'revenue', 'profit', 'loss', 'market', 'trade', 'day',
+    'high', 'low', 'open', 'close', 'volume', 'news', 'update', 'trend', 'analysis',
 }
 _TICKER_NOISE = {
     'P', 'E', 'PE', 'EPS', 'RSI', 'MACD', 'ADX', 'MFI', 'SMA', 'EMA', 'BB',
-    'ATR', 'OBV', 'ROI', 'ROE', 'ROA', 'PCT', 'USD', 'N/A',
+    'ATR', 'OBV', 'ROI', 'ROE', 'ROA', 'PCT', 'USD', 'N/A', 'PEG', 'IPO',
 }
 _TICKER_TOKEN_RE = re.compile(r'\b([A-Za-z]{2,6})\b')
+
+# Indicators whose names in a question should trigger live tech-data injection
+_INDICATOR_RE = re.compile(
+    r'\b(macd|rsi|adx|peg|bollinger|stochastic|stoch|sma|ema|obv|mfi|atr|moving average|'
+    r'golden cross|death cross|crossover|histogram|divergence|overbought|oversold|'
+    r'momentum|trend strength|signal line|support|resistance)\b',
+    re.IGNORECASE,
+)
+_HORIZON_DETAIL_RE = re.compile(
+    r'\b((short|medium|long)[-\s]?term|next few months|next quarter|6[-\s]?12 months|'
+    r'long[-\s]?run|outlook|thesis|deeper|more details|expand|walk me through|go over|explain more)\b',
+    re.IGNORECASE,
+)
 
 
 class AgentService:
@@ -97,31 +95,47 @@ class AgentService:
         user_message: str,
         conversation_history: List[Dict[str, str]],
         model_key: str = "gemma3",
+        last_analyzed_ticker: str = "",
     ) -> Dict[str, Any]:
+        current_context_ticker = (last_analyzed_ticker or "").upper().strip()
+
         # Explicit comparison requests are easier to answer deterministically than
         # through the single-stock tool loop, so handle them up front.
         if self._looks_like_comparison_request(user_message):
-            forced = self._force_stock_comparison(user_message, conversation_history)
+            forced = self._force_stock_comparison(
+                user_message,
+                conversation_history,
+                preferred_ticker=current_context_ticker,
+            )
             if forced:
                 return forced
 
-        prompt_parts: List[str] = [f"[SYSTEM]\n{_SYSTEM_PROMPT}\n"]
-        for msg in conversation_history[-10:]:
-            role = msg.get("role", "user").capitalize()
-            prompt_parts.append(f"[{role}]\n{msg.get('content', '')}\n")
-        prompt_parts.append(f"[User]\n{user_message}\n[Assistant]")
-
         # Inject a hint listing the exact tokens the user typed so the LLM
         # can't mangle ticker symbols like CMCSA → CMSA.
-        ticker_hint = self._build_ticker_hint(user_message)
-        if ticker_hint:
-            prompt_parts[-1] = f"[User]\n{user_message}\n{ticker_hint}\n[Assistant]"
-
-        prompt = "\n".join(prompt_parts)
+        # Also pins the context ticker when the message has no explicit ticker.
+        ticker_hint = self._build_ticker_hint(user_message, context_ticker=current_context_ticker)
+        prompt = build_chat_prompt(
+            system_prompt=_SYSTEM_PROMPT,
+            user_message=user_message,
+            conversation_history=conversation_history,
+            ticker_hint=ticker_hint,
+        )
         tool_updates: List[str] = []
         analysis_html: str = ""
         tool_context: List[str] = []
         citations: List[Dict[str, str]] = []
+
+        # Pre-seed with live indicator data when the question targets a specific
+        # technical concept so the LLM answers with real numbers, not a textbook recap.
+        if current_context_ticker and self._looks_like_horizon_detail_question(user_message):
+            horizon_ctx = self._build_horizon_detail_context(user_message, current_context_ticker)
+            if horizon_ctx:
+                tool_context.append(horizon_ctx)
+
+        if current_context_ticker and self._looks_like_indicator_question(user_message):
+            indicator_ctx = self._build_indicator_context(user_message, current_context_ticker)
+            if indicator_ctx:
+                tool_context.append(indicator_ctx)
 
         for iteration in range(MAX_TOOL_ITERATIONS):
             full_prompt = prompt
@@ -145,29 +159,61 @@ class AgentService:
                     self._looks_like_full_analysis_request(user_message)
                     or self._looks_like_symbol_only_request(user_message)
                 ):
-                    forced = self._force_full_analysis(user_message, conversation_history)
+                    forced = self._force_full_analysis(
+                        user_message,
+                        conversation_history,
+                        preferred_ticker=current_context_ticker,
+                    )
                     if forced:
                         tool_updates.extend(forced.get("tool_updates", []))
                         analysis_html = forced.get("analysis_html", "")
+                        current_context_ticker = (
+                            forced.get("last_analyzed_ticker", "") or current_context_ticker
+                        )
                         if forced.get("reply"):
                             reply = forced["reply"]
                 if not analysis_html:
                     parsed = self._parse_json_analysis_reply(reply)
                     if parsed:
-                        rendered = self._ensure_analysis_markup(parsed, parsed.get("ticker", ""), parsed.get("analysis_html", ""))
+                        rendered = self.formatter.ensure_analysis_markup(
+                            parsed,
+                            parsed.get("ticker", ""),
+                            parsed.get("analysis_html", ""),
+                        )
                         if rendered:
                             tool_updates.append("📊 Rendering analysis card...")
                             analysis_html = rendered
-                            reply = f"I ran a full analysis for <b>{parsed.get('ticker', '')}</b>. See the detailed recommendation card below."
+                            parsed_ticker = (parsed.get("ticker") or "").upper().strip()
+                            if parsed_ticker:
+                                current_context_ticker = parsed_ticker
+                            reply = (
+                                f"I ran a full analysis for {parsed.get('ticker', '')}. "
+                                "See the detailed recommendation card below."
+                            )
                 if not analysis_html:
-                    reply = self._rewrite_generic_followup(reply, user_message, conversation_history)
+                    reply = self._rewrite_generic_followup(
+                        reply,
+                        user_message,
+                        conversation_history,
+                        preferred_ticker=current_context_ticker,
+                    )
                 if self._looks_like_deal_news_query(user_message) and not citations:
-                    fallback_citations = self._fetch_fallback_web_citations(user_message, conversation_history)
+                    fallback_citations = self._fetch_fallback_web_citations(
+                        user_message,
+                        conversation_history,
+                        preferred_ticker=current_context_ticker,
+                    )
                     if fallback_citations:
                         citations.extend(fallback_citations)
                         tool_updates.append("🌐 Added source links...")
-                reply = self._append_citations_html(reply, citations)
-                return {"tool_updates": tool_updates, "reply": reply, "analysis_html": analysis_html}
+                reply = self._compact_reply_text(reply, has_analysis_html=bool(analysis_html))
+                reply = self.formatter.append_citations_html(reply, citations)
+                return {
+                    "tool_updates": tool_updates,
+                    "reply": reply,
+                    "analysis_html": analysis_html,
+                    "last_analyzed_ticker": current_context_ticker,
+                }
 
             if match:
                 json_str = match.group(1).strip()
@@ -176,12 +222,51 @@ class AgentService:
                 except json.JSONDecodeError as e:
                     print(f"[Agent] Bad tool call JSON: {json_str!r} - {e}")
                     reply = _TOOL_CALL_RE.sub("", raw).strip() or "I ran into an issue. Please rephrase."
-                    return {"tool_updates": tool_updates, "reply": reply, "analysis_html": analysis_html}
+                    reply = self._compact_reply_text(reply, has_analysis_html=bool(analysis_html))
+                    return {
+                        "tool_updates": tool_updates,
+                        "reply": reply,
+                        "analysis_html": analysis_html,
+                        "last_analyzed_ticker": current_context_ticker,
+                    }
             else:
                 call = plain_call
 
             tool_name = call.get("name", "")
             args = call.get("args", {})
+            has_explicit_ticker_tokens = self._has_explicit_ticker_tokens(user_message)
+
+            is_horizon_followup = bool(
+                current_context_ticker and self._looks_like_horizon_detail_question(user_message)
+            )
+
+            if (
+                tool_name == "resolve_ticker"
+                and current_context_ticker
+                and not has_explicit_ticker_tokens
+            ):
+                tool_updates.append(f"🔎 Using previous ticker {current_context_ticker}...")
+                tool_context.append(
+                    f"[Tool result for resolve_ticker]\n"
+                    f"{{\"ticker\": \"{current_context_ticker}\", \"company_name\": \"{current_context_ticker}\"}}\n"
+                )
+                continue
+
+            if is_horizon_followup and tool_name == "resolve_ticker":
+                tool_updates.append(f"🔎 Using previous ticker {current_context_ticker}...")
+                tool_context.append(
+                    f"[Tool result for resolve_ticker]\n"
+                    f"{{\"ticker\": \"{current_context_ticker}\", \"company_name\": \"{current_context_ticker}\"}}\n"
+                )
+                continue
+
+            if is_horizon_followup and tool_name == "run_full_analysis":
+                tool_updates.append("🧭 Reusing prior full-analysis context...")
+                tool_context.append(
+                    "[Tool result for run_full_analysis]\n"
+                    "{\"info\": \"Skipped because the user asked for a deeper explanation of the existing horizon outlook. Reuse the prior analysis context instead of rerunning the full card.\"}\n"
+                )
+                continue
 
             explicit_ticker = self._extract_explicit_ticker(user_message)
             if explicit_ticker:
@@ -209,16 +294,35 @@ class AgentService:
             tool_updates.append(label)
             citations.extend(self._extract_citations(tool_name, result_str))
 
+            if tool_name == "get_earnings":
+                if self._should_short_circuit_earnings_reply(user_message):
+                    earnings_reply = self._build_earnings_reply(args, result_str)
+                    if earnings_reply:
+                        reply = self._compact_reply_text(earnings_reply, has_analysis_html=bool(analysis_html))
+                        reply = self.formatter.append_citations_html(reply, citations)
+                        return {
+                            "tool_updates": tool_updates,
+                            "reply": reply,
+                            "analysis_html": analysis_html,
+                            "last_analyzed_ticker": current_context_ticker,
+                        }
+                elif self._looks_like_past_earnings_request(user_message):
+                    tool_context.append(
+                        "[SYSTEM NOTE: The user asked about a previous earnings call. "
+                        "Use get_earnings output for date anchors only, then call web_search for recap/transcript sources.]"
+                    )
+
             if tool_name == "run_full_analysis":
                 try:
                     result_data = json.loads(result_str)
                     ticker = result_data.get("ticker", "")
                     if ticker and not result_data.get("error"):
-                        # Use the pre-rendered HTML from FormattingService (includes chart,
-                        # heatmap badges, logo, expandable sections). Fall back to the
-                        # lightweight builder only if the formatter was unavailable.
-                        analysis_html = result_data.get("analysis_html") or self._build_analysis_html(result_data, ticker)
-                        analysis_html = self._ensure_analysis_markup(result_data, ticker, analysis_html)
+                        current_context_ticker = ticker.upper()
+                        analysis_html = self.formatter.ensure_analysis_markup(
+                            result_data,
+                            ticker,
+                            result_data.get("analysis_html", ""),
+                        )
                         compact = {
                             k: v for k, v in result_data.items()
                             if k not in ("analysis_html", "recent_news_headlines")
@@ -243,32 +347,60 @@ class AgentService:
             self._looks_like_full_analysis_request(user_message)
             or self._looks_like_symbol_only_request(user_message)
         ):
-            forced = self._force_full_analysis(user_message, conversation_history)
+            forced = self._force_full_analysis(
+                user_message,
+                conversation_history,
+                preferred_ticker=current_context_ticker,
+            )
             if forced:
                 tool_updates.extend(forced.get("tool_updates", []))
                 analysis_html = forced.get("analysis_html", "")
+                current_context_ticker = (
+                    forced.get("last_analyzed_ticker", "") or current_context_ticker
+                )
                 if forced.get("reply"):
                     reply = forced["reply"]
         if not analysis_html:
             parsed = self._parse_json_analysis_reply(reply)
             if parsed:
-                rendered = self._ensure_analysis_markup(parsed, parsed.get("ticker", ""), parsed.get("analysis_html", ""))
+                rendered = self.formatter.ensure_analysis_markup(
+                    parsed,
+                    parsed.get("ticker", ""),
+                    parsed.get("analysis_html", ""),
+                )
                 if rendered:
                     tool_updates.append("📊 Rendering analysis card...")
                     analysis_html = rendered
-                    reply = f"I ran a full analysis for <b>{parsed.get('ticker', '')}</b>. See the detailed recommendation card below."
+                    parsed_ticker = (parsed.get("ticker") or "").upper().strip()
+                    if parsed_ticker:
+                        current_context_ticker = parsed_ticker
+                    reply = (
+                        f"I ran a full analysis for {parsed.get('ticker', '')}. "
+                        "See the detailed recommendation card below."
+                    )
         if not analysis_html:
-            reply = self._rewrite_generic_followup(reply, user_message, conversation_history)
+            reply = self._rewrite_generic_followup(
+                reply,
+                user_message,
+                conversation_history,
+                preferred_ticker=current_context_ticker,
+            )
         if self._looks_like_deal_news_query(user_message) and not citations:
-            fallback_citations = self._fetch_fallback_web_citations(user_message, conversation_history)
+            fallback_citations = self._fetch_fallback_web_citations(
+                user_message,
+                conversation_history,
+                preferred_ticker=current_context_ticker,
+            )
             if fallback_citations:
                 citations.extend(fallback_citations)
                 tool_updates.append("🌐 Added source links...")
-        reply = self._append_citations_html(reply, citations)
+        reply = self._compact_reply_text(reply, has_analysis_html=bool(analysis_html))
+        reply = self.formatter.append_citations_html(reply, citations)
         return {
             "tool_updates": tool_updates,
             "reply": _TOOL_CALL_RE.sub("", reply).strip(),
             "analysis_html": analysis_html,
+            "last_analyzed_ticker": current_context_ticker,
         }
 
     def _parse_plain_tool_call(self, raw: str) -> Dict[str, Any] | None:
@@ -330,6 +462,9 @@ class AgentService:
     def _looks_like_full_analysis_request(self, user_message: str) -> bool:
         """Detect explicit recommendation-style requests for the full analysis card."""
         text = (user_message or "").lower()
+        if self._looks_like_horizon_detail_question(text):
+            return False
+
         explicit_analysis_terms = (
             "full analysis", "analy", "analysis", "recommend", "recommendation",
             "should i buy", "should i sell", "buy or sell", "entry point",
@@ -357,9 +492,14 @@ class AgentService:
         self,
         user_message: str,
         conversation_history: List[Dict[str, str]],
+        preferred_ticker: str = "",
     ) -> Dict[str, Any] | None:
         """Resolve two tickers and render a side-by-side comparison card."""
-        tickers = self._extract_comparison_tickers(user_message, conversation_history)
+        tickers = self._extract_comparison_tickers(
+            user_message,
+            conversation_history,
+            preferred_ticker=preferred_ticker,
+        )
         if len(tickers) < 2:
             return None
 
@@ -377,67 +517,21 @@ class AgentService:
         if len(analyses) < 2:
             return None
 
-        cards = []
-        rows = []
-        for analysis in analyses:
-            comparison_analysis = type("ComparisonAnalysis", (), {})()
-            comparison_analysis.ticker = analysis.ticker
-            comparison_analysis.company_name = analysis.company_name
-            comparison_analysis.quote = analysis.quote
-            comparison_analysis.recommendations = analysis.recommendations
-            comparison_analysis.news = {"news": []}
-            comparison_analysis.price_history = analysis.price_history
-
-            if self.formatter:
-                try:
-                    card_html = self.formatter.format_analysis_html(comparison_analysis)
-                except Exception:
-                    card_html = self._build_analysis_html(analysis.to_dict(), analysis.ticker)
-            else:
-                card_html = self._build_analysis_html(analysis.to_dict(), analysis.ticker)
-            cards.append(f"<div class='comparison-card'>{card_html}</div>")
-
-            recs = analysis.recommendations or {}
-            short = recs.get('short_term', {}) or {}
-            medium = recs.get('medium_term', {}) or {}
-            long_ = recs.get('long_term', {}) or {}
-            price_text = self._format_comparison_price(getattr(analysis, 'quote', None))
-            rows.append(
-                "<tr>"
-                f"<td><b>{analysis.ticker}</b></td>"
-                f"<td>{analysis.company_name}</td>"
-                f"<td>{price_text}</td>"
-                f"<td>{short.get('label', 'N/A')}</td>"
-                f"<td>{medium.get('label', 'N/A')}</td>"
-                f"<td>{long_.get('label', 'N/A')}</td>"
-                "</tr>"
-            )
-
-        comparison_html = (
-            "<div class='comparison-section stock-card'>"
-            "<div class='stock-card-header'>"
-            "<div>"
-            "<div class='stock-name'>Stock Comparison</div>"
-            "<div class='stock-price-line'>Side-by-side analysis of the requested stocks.</div>"
-            "</div>"
-            "</div>"
-            "<div class='comparison-summary'>"
-            "<table class='comparison-table'>"
-            "<thead><tr><th>Ticker</th><th>Company</th><th>Price</th><th>Short</th><th>Medium</th><th>Long</th></tr></thead>"
-            f"<tbody>{''.join(rows)}</tbody>"
-            "</table>"
-            "</div>"
-            f"<div class='comparison-grid'>{''.join(cards)}</div>"
-            "</div>"
-        )
+        comparison_html = self.formatter.format_stock_comparison(analyses)
 
         return {
             "tool_updates": tool_updates,
-            "reply": f"I compared <b>{analyses[0].ticker}</b> and <b>{analyses[1].ticker}</b>. See the comparison card below.",
+            "reply": f"I compared {analyses[0].ticker} and {analyses[1].ticker}. See the comparison card below.",
             "analysis_html": comparison_html,
+            "last_analyzed_ticker": analyses[0].ticker,
         }
 
-    def _force_full_analysis(self, user_message: str, conversation_history: List[Dict[str, str]]) -> Dict[str, Any] | None:
+    def _force_full_analysis(
+        self,
+        user_message: str,
+        conversation_history: List[Dict[str, str]],
+        preferred_ticker: str = "",
+    ) -> Dict[str, Any] | None:
         """Run resolve_ticker + run_full_analysis when LLM skipped tool usage."""
         ticker = ""
         tool_updates: List[str] = []
@@ -467,7 +561,10 @@ class AgentService:
 
         # 3) Final fallback: reuse history ticker only when user did not specify one.
         if not ticker:
-            ticker = self._extract_ticker_from_history(conversation_history)
+            ticker = self._extract_ticker_from_history(
+                conversation_history,
+                preferred_ticker=preferred_ticker,
+            )
             if ticker:
                 tool_updates.append(f"🔎 Reusing last discussed ticker {ticker}...")
 
@@ -483,57 +580,21 @@ class AgentService:
             result_data = json.loads(analysis_str)
             if result_data.get("error"):
                 return None
-            analysis_html = result_data.get("analysis_html") or self._build_analysis_html(result_data, ticker)
-            analysis_html = self._ensure_analysis_markup(result_data, ticker, analysis_html)
+            analysis_html = self.formatter.ensure_analysis_markup(
+                result_data,
+                ticker,
+                result_data.get("analysis_html", ""),
+            )
             if not analysis_html:
                 return None
             return {
                 "tool_updates": tool_updates,
                 "analysis_html": analysis_html,
-                "reply": f"I ran a full analysis for <b>{ticker}</b>. See the detailed recommendation card below.",
+                "reply": f"I ran a full analysis for {ticker}. See the detailed recommendation card below.",
+                "last_analyzed_ticker": ticker,
             }
         except Exception:
             return None
-
-    def _ensure_analysis_markup(self, result_data: Dict, ticker: str, analysis_html: str) -> str:
-        """Regenerate analysis HTML if a partial renderer dropped the heatmap/card markup."""
-        if analysis_html and "badge-" in analysis_html and "rec-section-title" in analysis_html:
-            return analysis_html
-
-        if self.formatter:
-            try:
-                class _AnalysisFallback:
-                    pass
-
-                analysis = _AnalysisFallback()
-                analysis.ticker = ticker
-                analysis.company_name = result_data.get("company_name", ticker)
-                analysis.quote = {
-                    "data": {
-                        "price": result_data.get("price"),
-                        "currency": result_data.get("currency", "USD"),
-                        "name": result_data.get("company_name", ticker),
-                    }
-                }
-                analysis.recommendations = result_data.get("recommendations", {}) or {}
-                analysis.news = {"news": []}
-                analysis.price_history = {"dates": [], "prices": []}
-
-                rendered = self.formatter.format_analysis_html(analysis)
-                if rendered and "badge-" in rendered and "rec-section-title" in rendered:
-                    return rendered
-            except Exception:
-                pass
-
-        # Final fallback: synthesize the modern card from available recommendation data.
-        try:
-            fallback = self._build_analysis_html(result_data, ticker)
-            if fallback and "stock-card" in fallback:
-                return fallback
-        except Exception:
-            pass
-
-        return analysis_html
 
     def _parse_json_analysis_reply(self, reply: str) -> Dict[str, Any] | None:
         """Parse a model reply that is actually the tool JSON payload."""
@@ -560,8 +621,16 @@ class AgentService:
 
         return data
 
-    def _extract_ticker_from_history(self, conversation_history: List[Dict[str, str]]) -> str:
+    def _extract_ticker_from_history(
+        self,
+        conversation_history: List[Dict[str, str]],
+        preferred_ticker: str = "",
+    ) -> str:
         """Extract the most recent plausible ticker from prior chat messages."""
+        preferred = (preferred_ticker or "").upper().strip()
+        if preferred and preferred.lower() not in _SKIP_WORDS and preferred not in _TICKER_NOISE:
+            return preferred
+
         for msg in reversed(conversation_history or []):
             content = (msg.get("content") or "").strip()
             if not content:
@@ -589,7 +658,12 @@ class AgentService:
 
         return ""
 
-    def _extract_comparison_tickers(self, user_message: str, conversation_history: List[Dict[str, str]]) -> List[str]:
+    def _extract_comparison_tickers(
+        self,
+        user_message: str,
+        conversation_history: List[Dict[str, str]],
+        preferred_ticker: str = "",
+    ) -> List[str]:
         """Extract up to two comparison tickers from the query and chat history."""
         resolved: List[str] = []
         seen = set()
@@ -607,7 +681,10 @@ class AgentService:
                 seen.add(clean)
 
         # Current context ticker should be part of the comparison when present.
-        current_ticker = self._extract_ticker_from_history(conversation_history)
+        current_ticker = self._extract_ticker_from_history(
+            conversation_history,
+            preferred_ticker=preferred_ticker,
+        )
         if current_ticker:
             add_symbol(current_ticker)
 
@@ -661,33 +738,12 @@ class AgentService:
 
         return resolved[:2]
 
-    def _format_comparison_price(self, quote: Any) -> str:
-        """Format price text for comparison table, handling multiple quote shapes."""
-        if not isinstance(quote, dict):
-            return 'N/A'
-
-        qdata = quote.get('data') if isinstance(quote.get('data'), dict) else quote
-        if not isinstance(qdata, dict):
-            return 'N/A'
-
-        raw_price = qdata.get('price')
-        if raw_price is None:
-            raw_price = qdata.get('currentPrice')
-
-        currency = qdata.get('currency', '')
-        try:
-            price_val = float(raw_price)
-            if currency:
-                return f"${price_val:,.2f} {currency}"
-            return f"${price_val:,.2f}"
-        except Exception:
-            return str(raw_price) if raw_price not in (None, '') else 'N/A'
-
     def _rewrite_generic_followup(
         self,
         reply: str,
         user_message: str,
         conversation_history: List[Dict[str, str]],
+        preferred_ticker: str = "",
     ) -> str:
         """Replace repetitive generic follow-up prompts with intent-aware options."""
         text = (reply or "").strip()
@@ -696,7 +752,7 @@ class AgentService:
 
         generic_pattern = re.compile(
             r"Would you like me to run a full analysis for\s+"
-            r"(?:<b>)?([A-Z0-9\.^]{1,10})(?:</b>)?"
+            r"([A-Z0-9\.^]{1,10})"
             r",?\s*or\s*would\s*you\s*like\s*to\s*compare\s*it\s*to\s*another\s*stock\??",
             re.IGNORECASE,
         )
@@ -704,56 +760,72 @@ class AgentService:
             return text
 
         match = generic_pattern.search(text)
-        ticker = (match.group(1).upper() if match else "") or self._extract_ticker_from_history(conversation_history)
+        ticker = (match.group(1).upper() if match else "") or self._extract_ticker_from_history(
+            conversation_history,
+            preferred_ticker=preferred_ticker,
+        )
         if not ticker:
             ticker = "this stock"
 
         question = (user_message or "").lower()
         replacement = (
-            f"Would you like a quick snapshot for <b>{ticker}</b> "
+            f"Would you like a quick snapshot for {ticker} "
             f"(price, valuation, and 52-week range), or latest news headlines?"
         )
 
         if any(k in question for k in ("news", "headline", "article", "press", "announcement")):
             replacement = (
-                f"Want me to pull the latest 5 headlines for <b>{ticker}</b>, "
+                f"Want me to pull the latest 5 headlines for {ticker}, "
                 f"or compare today's sentiment vs price move?"
             )
         elif any(k in question for k in ("price", "up", "down", "today", "performance", "trend", "chart", "volume")):
             replacement = (
-                f"Want a quick performance snapshot for <b>{ticker}</b> "
+                f"Want a quick performance snapshot for {ticker} "
                 f"(price, day move, and range), or a side-by-side comparison with a peer?"
             )
         elif any(k in question for k in ("valuation", "pe", "p/e", "cheap", "expensive", "multiple")):
             replacement = (
-                f"Want me to break down <b>{ticker}</b>'s valuation metrics, "
+                f"Want me to break down {ticker}'s valuation metrics, "
                 f"or compare valuation against a competitor?"
             )
         elif any(k in question for k in ("company", "business", "ceo", "founded", "overview", "what is", "tell me about")):
             replacement = (
-                f"Would you like a company snapshot for <b>{ticker}</b> "
+                f"Would you like a company snapshot for {ticker} "
                 f"(business, key metrics, and recent headlines), or should I focus on one area?"
             )
 
         return generic_pattern.sub(replacement, text)
 
-    def _build_ticker_hint(self, user_message: str) -> str:
-        """Return a prompt hint listing exact ticker-like tokens from the user message.
-        This prevents the LLM from mangling e.g. 'cmcsa' → 'CMSA'."""
+    def _build_ticker_hint(self, user_message: str, context_ticker: str = "") -> str:
+        """Return a prompt hint pinning the ticker the LLM should operate on.
+        When the user message contains an explicit ticker token, that takes priority.
+        When it doesn't, the session context ticker is injected so the LLM never
+        guesses a random word (e.g. 'NEXT' from 'when are the next earnings?')."""
         tokens = _TICKER_TOKEN_RE.findall(user_message)
         candidates = [
             t.upper() for t in tokens
-            if t.lower() not in _SKIP_WORDS
+            if t.lower() not in _SKIP_WORDS and t.upper() not in _TICKER_NOISE
         ]
-        if not candidates:
-            return ""
         unique = list(dict.fromkeys(candidates))  # deduplicate, preserve order
-        items = ", ".join(f'"{c}"' for c in unique)
-        return (
-            f"[SYSTEM NOTE: The user message contains these exact strings: {items}. "
-            f"When calling resolve_ticker, use the EXACT string as written above — "
-            f"do NOT abbreviate, truncate, or alter it in any way.]"
-        )
+
+        if unique:
+            items = ", ".join(f'"{c}"' for c in unique)
+            return (
+                f"[SYSTEM NOTE: The user message contains these exact strings: {items}. "
+                f"When calling resolve_ticker, use the EXACT string as written above — "
+                f"do NOT abbreviate, truncate, or alter it in any way.]"
+            )
+
+        # No ticker token in the message — pin the session context ticker.
+        ctx = (context_ticker or "").upper().strip()
+        if ctx and ctx.lower() not in _SKIP_WORDS and ctx not in _TICKER_NOISE:
+            return (
+                f"[SYSTEM NOTE: The user did not mention a specific ticker. "
+                f"The current session context is {ctx}. "
+                f"Use {ctx} as the ticker for any tool calls unless the user explicitly names a different company.]"
+            )
+
+        return ""
 
     def _extract_citations(self, tool_name: str, result_str: str) -> List[Dict[str, str]]:
         """Extract citation candidates from tool outputs."""
@@ -785,38 +857,6 @@ class AgentService:
 
         return citations
 
-    def _append_citations_html(self, reply: str, citations: List[Dict[str, str]]) -> str:
-        """Append unique clickable citations to the reply if available."""
-        if not citations:
-            return reply
-
-        seen = set()
-        unique: List[Dict[str, str]] = []
-        for item in citations:
-            url = normalize_result_url((item.get("url") or "").strip())
-            if not url or url in seen:
-                continue
-            seen.add(url)
-            unique.append({**item, "url": url})
-
-        if not unique:
-            return reply
-
-        links = []
-        for item in unique[:5]:
-            title = item.get("title", "Source")
-            source = item.get("source", "Source")
-            url = item.get("url", "#")
-            links.append(f"<li><a href=\"{url}\" target=\"_blank\" rel=\"noopener\">{title}</a> <span style='color:#94a3b8;'>({source})</span></li>")
-
-        citations_html = "<br><br><b>Sources:</b><ul>" + "".join(links) + "</ul>"
-        body = (reply or "").strip()
-        if not body:
-            return citations_html
-        if "<b>Sources:</b>" in body:
-            return body
-        return body + citations_html
-
     def _looks_like_deal_news_query(self, user_message: str) -> bool:
         """Detect acquisition/deal/news intents that should include source links."""
         text = (user_message or "").lower()
@@ -827,19 +867,478 @@ class AgentService:
         )
         return any(term in text for term in terms)
 
+    def _looks_like_past_earnings_request(self, user_message: str) -> bool:
+        """Detect questions about previous earnings calls/results, not the next scheduled date."""
+        text = (user_message or "").lower()
+        if "earn" not in text:
+            return False
+
+        markers = (
+            "previous", "prev", "last", "prior", "recent earnings", "past earnings",
+            "what happened", "what was said", "highlights", "recap", "summary",
+            "transcript", "q&a", "qa", "guidance", "beat", "miss", "results",
+            "on the call", "during the call",
+        )
+        return any(marker in text for marker in markers)
+
+    def _looks_like_next_earnings_request(self, user_message: str) -> bool:
+        """Detect direct scheduling questions about the next/upcoming earnings call."""
+        text = (user_message or "").lower()
+        if "earn" not in text:
+            return False
+
+        markers = (
+            "next", "upcoming", "when is", "when's", "when will", "scheduled",
+            "date", "time", "calendar", "up next",
+        )
+        return any(marker in text for marker in markers)
+
+    def _should_short_circuit_earnings_reply(self, user_message: str) -> bool:
+        """Only auto-return get_earnings when user intent is clearly about next-call schedule."""
+        if self._looks_like_past_earnings_request(user_message):
+            return False
+        return self._looks_like_next_earnings_request(user_message)
+
+    def _build_earnings_reply(self, args: Dict[str, Any], result_str: str) -> str:
+        """Build a concise deterministic reply for get_earnings tool output."""
+        ticker = (args.get("ticker") or "").upper().strip()
+        try:
+            payload = json.loads(result_str or "{}")
+        except Exception:
+            payload = {}
+
+        if not isinstance(payload, dict):
+            return ""
+
+        ticker = (payload.get("ticker") or ticker or "this company").upper()
+        next_available = bool(payload.get("next_earnings_available"))
+        next_earnings = payload.get("next_earnings") if isinstance(payload.get("next_earnings"), dict) else {}
+        latest_known = (payload.get("latest_known_earnings_date") or "").strip()
+        err = (payload.get("error") or "").strip()
+
+        def _humanize_date(raw: Any) -> str:
+            text = str(raw or "").strip()
+            if not text:
+                return ""
+
+            # Parse legacy string form like "[datetime.date(2026, 7, 16)]".
+            m = re.search(r"datetime\.date\((\d{4}),\s*(\d{1,2}),\s*(\d{1,2})\)", text)
+            if m:
+                try:
+                    from datetime import date as _date
+                    dt = _date(int(m.group(1)), int(m.group(2)), int(m.group(3)))
+                    return dt.strftime("%b %d, %Y")
+                except Exception:
+                    pass
+
+            # Handle plain ISO date-like strings.
+            iso = text.replace("Z", "+00:00")
+            for parser in (
+                lambda s: __import__("datetime").datetime.strptime(s[:10], "%Y-%m-%d"),
+                lambda s: __import__("datetime").datetime.fromisoformat(s),
+            ):
+                try:
+                    dt = parser(iso)
+                    return dt.strftime("%b %d, %Y")
+                except Exception:
+                    continue
+
+            # Strip list wrappers if present.
+            text = re.sub(r"^\[|\]$", "", text)
+            return text
+
+        def _market_session_text(details: Dict[str, Any]) -> str:
+            if not details:
+                return ""
+            for key in (
+                "Earnings Call Time", "earnings_call_time", "earningsTime", "time", "session"
+            ):
+                value = details.get(key)
+                if not value:
+                    continue
+                raw = str(value).strip()
+                low = raw.lower()
+                if any(term in low for term in ("before market", "pre-market", "premarket", "bmo")):
+                    return "pre-market"
+                if any(term in low for term in ("after market", "post-market", "after hours", "amc")):
+                    return "post-market"
+                return raw
+            return ""
+
+        def _format_timestamp_et(raw: Any) -> str:
+            if raw in (None, ""):
+                return ""
+
+            try:
+                ts = float(raw)
+            except (TypeError, ValueError):
+                return ""
+
+            # Handle millisecond timestamps if provided.
+            if ts > 10_000_000_000:
+                ts = ts / 1000.0
+
+            try:
+                from datetime import datetime, timezone
+                from zoneinfo import ZoneInfo
+
+                dt_utc = datetime.fromtimestamp(ts, tz=timezone.utc)
+                dt_et = dt_utc.astimezone(ZoneInfo("America/New_York"))
+                return dt_et.strftime("%b %d, %Y %I:%M %p ET")
+            except Exception:
+                return ""
+
+        next_date = ""
+        if next_earnings:
+            for key in (
+                "Earnings Date", "earningsDate", "date", "earnings_date",
+                "startdatetime", "startdatetimetz", "startdatetimeutc",
+            ):
+                value = next_earnings.get(key)
+                if value:
+                    next_date = _humanize_date(value)
+                    break
+
+        timestamp_fields = (
+            "earningsCallTimestampStart",
+            "earningsCallTimestampEnd",
+            "earningsTimestamp",
+        )
+        timestamp_parts: List[str] = []
+        for key in timestamp_fields:
+            if key not in next_earnings:
+                continue
+            formatted = _format_timestamp_et(next_earnings.get(key))
+            if not formatted:
+                continue
+            if key == "earningsCallTimestampStart":
+                timestamp_parts.append(f"call start: {formatted}")
+            elif key == "earningsCallTimestampEnd":
+                timestamp_parts.append(f"call end: {formatted}")
+            else:
+                timestamp_parts.append(f"event timestamp: {formatted}")
+
+        timestamps_text = ""
+        if timestamp_parts:
+            timestamps_text = " Timestamp details: " + "; ".join(timestamp_parts) + "."
+
+        session_text = _market_session_text(next_earnings)
+
+        if next_available and next_date:
+            if session_text:
+                return (
+                    f"The next earnings call for {ticker} is scheduled for {next_date} ({session_text})."
+                    f"{timestamps_text}"
+                )
+            return (
+                f"The next earnings call for {ticker} is scheduled for {next_date}. "
+                f"The pre/post-market session is not provided in the current feed."
+                f"{timestamps_text}"
+            )
+
+        if next_available:
+            return f"I found an upcoming earnings event for {ticker}, but the exact date field is not available in the current feed."
+
+        if latest_known:
+            return (
+                f"I don't have a confirmed next earnings call date for {ticker} yet. "
+                f"The latest known earnings record in the feed is dated {latest_known}."
+            )
+
+        if err:
+            return f"I couldn't fetch the next earnings call date for {ticker} right now ({err})."
+
+        return f"I don't have a confirmed next earnings call date for {ticker} yet."
+
     def _fetch_fallback_web_citations(
         self,
         user_message: str,
         conversation_history: List[Dict[str, str]],
+        preferred_ticker: str = "",
     ) -> List[Dict[str, str]]:
         """Fetch web_search citations when the model answers without source tools."""
-        anchor = self._extract_ticker_from_history(conversation_history)
+        anchor = self._extract_ticker_from_history(
+            conversation_history,
+            preferred_ticker=preferred_ticker,
+        )
         query = f"{anchor} {user_message}".strip() if anchor else user_message
         try:
             result_str, _ = self.executor.execute("web_search", {"query": query})
             return self._extract_citations("web_search", result_str)
         except Exception:
             return []
+
+    def _looks_like_indicator_question(self, user_message: str) -> bool:
+        """Return True when the question is about a specific technical indicator."""
+        return bool(_INDICATOR_RE.search(user_message or ""))
+
+    def _looks_like_horizon_detail_question(self, user_message: str) -> bool:
+        """Return True for follow-ups asking to expand on a prior horizon outlook."""
+        text = (user_message or "")
+        if not _HORIZON_DETAIL_RE.search(text):
+            return False
+        lowered = text.lower()
+        return any(term in lowered for term in (
+            'short term', 'short-term', 'medium term', 'medium-term', 'long term', 'long-term',
+            'next few months', 'next quarter', '6-12 months', 'long run', 'long-term outlook',
+            'long term outlook', 'medium-term outlook', 'short-term outlook', 'outlook', 'thesis'
+        ))
+
+    def _requested_horizon(self, user_message: str) -> str:
+        """Map the user's wording to short/medium/long horizon buckets."""
+        text = (user_message or "").lower()
+        if any(term in text for term in ('short term', 'short-term', 'next week', 'near term', 'near-term')):
+            return 'short'
+        if any(term in text for term in ('medium term', 'medium-term', 'next few months', 'next quarter', '3 months')):
+            return 'medium'
+        if any(term in text for term in ('long term', 'long-term', '6-12 months', 'long run', 'long-run', 'long horizon')):
+            return 'long'
+        # If the user asks for more detail on the outlook/thesis without naming a
+        # horizon, default to long-term because that is the most natural reading.
+        return 'long'
+
+    def _build_horizon_detail_context(self, user_message: str, ticker: str) -> str:
+        """Fetch the last analyzed stock's recommendation data and inject horizon-specific follow-up context."""
+        horizon = self._requested_horizon(user_message)
+        if not horizon:
+            return ''
+
+        try:
+            analysis = self.executor.stock_service.get_analysis(ticker, ticker)
+            recs = getattr(analysis, 'recommendations', {}) or {}
+            horizon_key = f'{horizon}_term'
+            horizon_rec = recs.get(horizon_key) or {}
+            if not horizon_rec:
+                return ''
+
+            horizon_labels = {
+                'short': 'Short-term (1 week)',
+                'medium': 'Medium-term (3 months)',
+                'long': 'Long-term (6-12 months)',
+            }
+            lines = [
+                f"[FOLLOW-UP CONTEXT for {ticker}]",
+                f"The user is asking for more detail on the previous {horizon_labels.get(horizon, horizon)} outlook.",
+                f"Previous rating: {horizon_rec.get('label', 'N/A')} | Score: {horizon_rec.get('score', 'N/A')}",
+            ]
+
+            if horizon_rec.get('summary'):
+                lines.append(f"Prior horizon rationale: {horizon_rec.get('summary')}")
+
+            if horizon == 'short':
+                tech = (recs.get('technical') or {}).get('summary')
+                sent = (recs.get('sentiment') or {}).get('summary')
+                if tech:
+                    lines.append(f"Technical support: {tech}")
+                if sent:
+                    lines.append(f"Sentiment support: {sent}")
+            elif horizon == 'medium':
+                fund = (recs.get('fundamental') or {}).get('summary')
+                tech = (recs.get('technical') or {}).get('summary')
+                sent = (recs.get('sentiment') or {}).get('summary')
+                if fund:
+                    lines.append(f"Fundamental support: {fund}")
+                if tech:
+                    lines.append(f"Technical support: {tech}")
+                if sent:
+                    lines.append(f"Sentiment support: {sent}")
+            else:
+                fund = (recs.get('fundamental') or {}).get('summary')
+                tech = (recs.get('technical') or {}).get('summary')
+                if fund:
+                    lines.append(f"Long-term fundamental support: {fund}")
+                if tech:
+                    lines.append(f"Structural trend support: {tech}")
+
+            lines.append(
+                "[Expand specifically on this horizon only. Reference the prior conclusion, explain what drives it, "
+                "and add nuance about what could improve or weaken the outlook. Do NOT rerun or restate the entire full analysis card. "
+                "Answer in 2-4 short paragraphs.]"
+            )
+            return "\n".join(lines)
+        except Exception as exc:
+            print(f"[Agent] Horizon detail context fetch failed for {ticker}: {exc}")
+            return ''
+
+    def _build_indicator_context(self, user_message: str, ticker: str) -> str:
+        """Fetch live technical values for *ticker* and return a context note
+        scoped to the indicators mentioned in the question."""
+        try:
+            from src.tools.technical_analysis import TechnicalAnalysis
+            result = TechnicalAnalysis().analyze(ticker)
+            if not result or not result.data:
+                return ""
+            d = result.data
+
+            # Always include price + MACD block since it's the most common follow-up.
+            lines = [
+                f"[TECHNICAL DATA for {ticker}]",
+                f"Price: ${d.get('current_price', 'N/A'):.2f}  |  Day change: {d.get('price_change', 0):.2f}%",
+            ]
+
+            q = (user_message or "").lower()
+
+            if any(k in q for k in ("macd", "crossover", "signal line", "histogram", "divergence")):
+                macd = d.get("macd")
+                sig  = d.get("macd_signal")
+                hist = d.get("macd_hist")
+                cross = "bearish" if (macd is not None and sig is not None and macd < sig) else \
+                        "bullish" if (macd is not None and sig is not None and macd > sig) else "neutral"
+                lines.append(
+                    f"MACD: {macd:.4f}  |  Signal: {sig:.4f}  |  Histogram: {hist:.4f}  |  Status: {cross} crossover"
+                )
+
+            if any(k in q for k in ("rsi", "overbought", "oversold")):
+                rsi = d.get("rsi")
+                state = "overbought" if rsi and rsi > 70 else "oversold" if rsi and rsi < 30 else "neutral"
+                lines.append(f"RSI: {rsi:.2f} ({state})")
+
+            if any(k in q for k in ("stoch", "stochastic")):
+                lines.append(f"Stoch %K: {d.get('stoch_k', 'N/A'):.2f}  |  %D: {d.get('stoch_d', 'N/A'):.2f}")
+
+            if any(k in q for k in ("adx", "trend strength", "directional")):
+                adx = d.get("adx")
+                strength = "strong" if adx and adx > 25 else "weak"
+                lines.append(
+                    f"ADX: {adx:.2f} ({strength} trend)  |  +DI: {d.get('adx_positive', 'N/A'):.2f}  |  -DI: {d.get('adx_negative', 'N/A'):.2f}"
+                )
+
+            if any(k in q for k in ("bollinger", "bb", "band")):
+                lines.append(
+                    f"Bollinger Bands — Upper: {d.get('bb_upper', 'N/A'):.2f}  |  Mid: {d.get('bb_middle', 'N/A'):.2f}  |  Lower: {d.get('bb_lower', 'N/A'):.2f}"
+                )
+
+            if any(k in q for k in ("sma", "ema", "moving average", "golden cross", "death cross")):
+                lines.append(
+                    f"SMA20: {d.get('sma_20', 'N/A'):.2f}  |  SMA50: {d.get('sma_50', 'N/A'):.2f}  |  SMA200: {d.get('sma_200', 'N/A'):.2f}  |  EMA20: {d.get('ema_20', 'N/A'):.2f}"
+                )
+
+            if any(k in q for k in ("obv", "on-balance", "on balance")):
+                lines.append(f"OBV: {d.get('obv', 'N/A'):.0f}")
+
+            if any(k in q for k in ("mfi", "money flow")):
+                mfi = d.get("mfi")
+                lines.append(f"MFI: {mfi:.2f}" if mfi else "MFI: N/A")
+
+            # Always append SMA position flags for context.
+            flags = []
+            if d.get("above_sma_20") is not None:
+                flags.append(f"{'above' if d['above_sma_20'] else 'below'} SMA20")
+            if d.get("above_sma_50") is not None:
+                flags.append(f"{'above' if d['above_sma_50'] else 'below'} SMA50")
+            if d.get("above_sma_200") is not None:
+                flags.append(f"{'above' if d['above_sma_200'] else 'below'} SMA200")
+            if flags:
+                lines.append("Price is " + ", ".join(flags))
+
+            lines.append(
+                "[Use these exact values in your explanation. Do NOT repeat the full analysis card. "
+                "Answer in 2-3 short paragraphs: first explain what the indicator means, "
+                "then what the current values show for this stock specifically.]"
+            )
+            return "\n".join(lines)
+        except Exception as exc:
+            print(f"[Agent] Indicator context fetch failed for {ticker}: {exc}")
+            return ""
+
+    def _compact_reply_text(self, reply: str, has_analysis_html: bool = False) -> str:
+        """Reduce repetitive text and hide internal tool narration in final replies."""
+        text = (reply or "").strip()
+        if not text:
+            return text
+
+        # Remove tool-execution narration that leaks implementation details.
+        # Covers: "I ran/called/used/performed ... using/with <tool> ...",
+        #         "I ran a quick analysis using get_stock_snapshot ..."
+        text = re.sub(
+            r"(?:Additionally,\s*)?(?:For your question[^,]*?,\s*)?"
+            r"I (?:ran(?: a [^.]+?)? using|called|used|performed(?: a [^.]+?)? (?:using|with)) "
+            r"[a-z_A-Z][a-zA-Z_]+"            # tool name token
+            r"[^.]*?\.\s*",
+            "",
+            text,
+            flags=re.IGNORECASE,
+        )
+        text = re.sub(
+            r"I(?:'ve| have) called (?:the )?[a-z_A-Z][a-zA-Z_]+(?: tool)?\.?(?:\s*Here's what I got:)?\s*",
+            "",
+            text,
+            flags=re.IGNORECASE,
+        )
+        # Also strip mid-sentence "using <snake_case_tool>" references.
+        text = re.sub(
+            r"\s+using\s+[a-z][a-z_]{2,}(?=\s|[,.]|$)",
+            "",
+            text,
+            flags=re.IGNORECASE,
+        )
+        # Strip standalone JSON dumps that occasionally leak through after tool calls.
+        text = re.sub(
+            r"(?:^|\n)\s*\{\s*\"status\"\s*:\s*.*?\}\s*(?=\n|$)",
+            "",
+            text,
+            flags=re.IGNORECASE | re.DOTALL,
+        )
+        # Remove filler transition phrases.
+        text = re.sub(
+            r"Based on (?:the snapshot of [A-Z]{1,6}'s current stock data|the above data),?\s*(?:I can help you better understand[^.]*\.)?\s*",
+            "",
+            text,
+            flags=re.IGNORECASE,
+        )
+        text = re.sub(
+            r"to provide (?:a snapshot of [^.]+?stock data|an? overview of [^.]+?)\.\s*",
+            "",
+            text,
+            flags=re.IGNORECASE,
+        )
+        text = re.sub(
+            r"This information should help you better understand[^.]*\.\s*",
+            "",
+            text,
+            flags=re.IGNORECASE,
+        )
+
+        if has_analysis_html:
+            # Strip verbatim analysis-card section dumps already shown in the card.
+            section_patterns = [
+                r"Recommendations:\s.*?(?=(Fundamental Analysis:|Technical Analysis:|Sentiment Analysis:|\n\n|$))",
+                r"Fundamental Analysis:\s.*?(?=(Technical Analysis:|Sentiment Analysis:|\n\n|$))",
+                r"Technical Analysis:\s.*?(?=(Sentiment Analysis:|\n\n|$))",
+                r"Sentiment Analysis:\s.*?(?=(\n\n|$))",
+            ]
+            for pattern in section_patterns:
+                text = re.sub(pattern, "", text, flags=re.IGNORECASE | re.DOTALL)
+
+        # Deduplicate near-identical sentences while preserving paragraph structure.
+        seen: set = set()
+
+        def _dedup_paragraph(para: str) -> str:
+            sentences = re.split(r"(?<=[.!?])\s+", para)
+            out: List[str] = []
+            for sentence in sentences:
+                clean = sentence.strip()
+                if not clean:
+                    continue
+                norm = re.sub(r"\W+", "", clean).lower()
+                if not norm or norm in seen:
+                    continue
+                seen.add(norm)
+                out.append(clean)
+            result = " ".join(out).strip()
+            return re.sub(r"\s{2,}", " ", result)
+
+        # Split on blank lines to preserve natural paragraph boundaries.
+        raw_paras = re.split(r"\n{2,}", text)
+        deduped_paras = [_dedup_paragraph(p) for p in raw_paras]
+        deduped_paras = [p for p in deduped_paras if p]
+
+        # When an analysis card is already rendered, cap to 3 paragraphs.
+        if has_analysis_html and len(deduped_paras) > 3:
+            deduped_paras = deduped_paras[:3]
+
+        compact = "\n\n".join(deduped_paras)
+        return compact or text
 
     def _correct_ticker_arg(self, args: Dict, user_message: str) -> Dict:
         """If the LLM's company_name looks mangled vs the original user message,
@@ -885,87 +1384,15 @@ class AgentService:
             return candidates[0]
         return ""
 
-    def _build_analysis_html(self, result_data: Dict, ticker: str) -> str:
-        recs = result_data.get("recommendations", {}) or {}
-        price = result_data.get("price")
-        currency = result_data.get("currency", "USD")
-        company = result_data.get("company_name", ticker)
+    def _has_explicit_ticker_tokens(self, user_message: str) -> bool:
+        """Return True when the user message contains at least one explicit ticker-like token."""
+        # Use strict uppercase ticker pattern to avoid false positives from
+        # natural-language words in follow-up questions (e.g., "may").
+        tokens = re.findall(r'\b[A-Z]{2,6}(?:\.[A-Z]{1,2})?\b', user_message or "")
+        candidates = [
+            t
+            for t in tokens
+            if t.lower() not in _SKIP_WORDS and t.upper() not in _TICKER_NOISE
+        ]
+        return bool(candidates)
 
-        # Preferred fallback: use the same formatter/card classes as run_full_analysis.
-        if self.formatter:
-            try:
-                class _AnalysisFallback:
-                    pass
-
-                analysis = _AnalysisFallback()
-                analysis.ticker = ticker
-                analysis.company_name = company
-                analysis.quote = {
-                    "data": {
-                        "price": price,
-                        "currency": currency,
-                        "name": company,
-                    }
-                }
-                analysis.recommendations = recs
-                analysis.news = {"news": []}
-                analysis.price_history = {"dates": [], "prices": []}
-
-                rendered = self.formatter.format_analysis_html(analysis)
-                if rendered:
-                    return rendered
-            except Exception:
-                pass
-
-        # Last-resort fallback still emits class-based modern markup.
-        def _badge(label: str) -> str:
-            label_u = (label or "N/A").upper()
-            class_map = {
-                "STRONG BUY": "badge-strong-buy",
-                "BUY": "badge-buy",
-                "HOLD": "badge-hold",
-                "SELL": "badge-sell",
-            }
-            icon_map = {
-                "STRONG BUY": "▲▲",
-                "BUY": "▲",
-                "HOLD": "◆",
-                "SELL": "▼",
-            }
-            css_class = class_map.get(label_u, "badge-na")
-            icon = icon_map.get(label_u, "—")
-            return f"<span class='badge {css_class}'>{icon} {label_u}</span>"
-
-        def _row(title: str, data: Dict) -> str:
-            label = data.get("label") or "N/A"
-            summary = data.get("summary") or "No summary available"
-            return (
-                f"<div class='rec-row'>"
-                f"<div>"
-                f"<div class='rec-label'>{title}</div>"
-                f"<div class='stock-price-line'>{summary}</div>"
-                f"</div>"
-                f"{_badge(label)}"
-                f"</div>"
-            )
-
-        price_text = "N/A"
-        if isinstance(price, (int, float)):
-            price_text = f"${price:,.2f} {currency}"
-
-        return (
-            f"<div class='analysis-block stock-card' data-ticker='{ticker}'>"
-            f"<div class='stock-card-header'>"
-            f"<div>"
-            f"<div class='stock-name'>{company}<span class='stock-ticker-badge'>{ticker}</span></div>"
-            f"<div class='stock-price-line'>{price_text}</div>"
-            f"</div>"
-            f"</div>"
-            f"<div class='rec-section'>"
-            f"<div class='rec-section-title'>Time Horizon Recommendations</div>"
-            f"{_row('Short-term (1 week)', recs.get('short_term', {}) or {})}"
-            f"{_row('Medium-term (3 months)', recs.get('medium_term', {}) or {})}"
-            f"{_row('Long-term (6-12 months)', recs.get('long_term', {}) or {})}"
-            f"</div>"
-            f"</div>"
-        )

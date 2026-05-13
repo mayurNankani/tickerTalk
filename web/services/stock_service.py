@@ -228,23 +228,90 @@ class StockAnalysisService:
                 s_conf = sentiment.get('confidence', 0) or 0
 
                 # Build summaries with prefixed segments so formatting_service can split them
+                def _reason_items(summary: str) -> list[str]:
+                    text = (summary or '').strip()
+                    if not text:
+                        return []
+                    return [item.strip() for item in text.split(',') if item.strip()]
+
+                def _select_horizon_items(section: str, horizon: str, summary: str) -> str:
+                    items = _reason_items(summary)
+                    if not items:
+                        return ''
+
+                    if section == 'fundamental' and horizon == 'medium':
+                        return ', '.join(items[:2])
+
+                    if section == 'fundamental' and horizon == 'long':
+                        quality_terms = ('debt', 'liquidity', 'margin', 'roe', 'book value', 'current ratio')
+                        quality_items = [item for item in items if any(term in item.lower() for term in quality_terms)]
+                        chosen = quality_items[:2] or items[-2:]
+                        return ', '.join(chosen)
+
+                    if section == 'technical' and horizon == 'medium':
+                        medium_terms = ('macd', 'rsi', 'adx', 'sma20', 'sma50', 'stochastic', 'mfi')
+                        medium_items = [item for item in items if any(term in item.lower() for term in medium_terms)]
+                        chosen = medium_items[:2] or items[:2]
+                        return ', '.join(chosen)
+
+                    if section == 'technical' and horizon == 'long':
+                        long_terms = ('sma200', 'golden cross', 'major golden cross', 'long-term uptrend', 'long-term downtrend')
+                        long_items = [item for item in items if any(term in item.lower() for term in long_terms)]
+                        return ', '.join(long_items[:2])
+
+                    if section == 'sentiment' and horizon == 'medium':
+                        return ', '.join(items[:1])
+
+                    return ', '.join(items)
+
+                def _horizon_reason(section: str, horizon: str, summary: str) -> str:
+                    text = _select_horizon_items(section, horizon, summary)
+                    if not text:
+                        return ''
+
+                    if section == 'technical' and horizon == 'short':
+                        return f"Near-term momentum setup: {text}"
+                    if section == 'sentiment' and horizon == 'short':
+                        return f"News-driven catalyst bias (1-4 weeks): {text}"
+
+                    if section == 'fundamental' and horizon == 'medium':
+                        return f"Fundamental setup for the next quarter: {text}"
+                    if section == 'technical' and horizon == 'medium':
+                        return f"Trend confirmation over the next few months: {text}"
+                    if section == 'sentiment' and horizon == 'medium':
+                        return f"Sentiment tailwind/headwind for medium term: {text}"
+
+                    if section == 'fundamental' and horizon == 'long':
+                        return f"Long-horizon business quality and valuation: {text}"
+                    if section == 'technical' and horizon == 'long':
+                        return f"Primary trend structure for 6-12 months: {text}"
+
+                    return text
+
                 def _short_summary():
                     parts = []
-                    if technical.get('summary'): parts.append(f"Technical: {technical['summary']}")
-                    if sentiment.get('summary'): parts.append(f"Sentiment: {sentiment['summary']}")
+                    tech = _horizon_reason('technical', 'short', technical.get('summary', ''))
+                    sent = _horizon_reason('sentiment', 'short', sentiment.get('summary', ''))
+                    if tech: parts.append(f"Technical: {tech}")
+                    if sent: parts.append(f"Sentiment: {sent}")
                     return ' | '.join(parts)
 
                 def _medium_summary():
                     parts = []
-                    if fundamental.get('summary'): parts.append(f"Fundamentals: {fundamental['summary']}")
-                    if technical.get('summary'): parts.append(f"Technical: {technical['summary']}")
-                    if sentiment.get('summary'): parts.append(f"Sentiment: {sentiment['summary']}")
+                    fund = _horizon_reason('fundamental', 'medium', fundamental.get('summary', ''))
+                    tech = _horizon_reason('technical', 'medium', technical.get('summary', ''))
+                    sent = _horizon_reason('sentiment', 'medium', sentiment.get('summary', ''))
+                    if fund: parts.append(f"Fundamentals: {fund}")
+                    if tech: parts.append(f"Technical: {tech}")
+                    if sent: parts.append(f"Sentiment: {sent}")
                     return ' | '.join(parts)
 
                 def _long_summary():
                     parts = []
-                    if fundamental.get('summary'): parts.append(f"Fundamentals: {fundamental['summary']}")
-                    if technical.get('summary'): parts.append(f"Technical: {technical['summary']}")
+                    fund = _horizon_reason('fundamental', 'long', fundamental.get('summary', ''))
+                    tech = _horizon_reason('technical', 'long', technical.get('summary', ''))
+                    if fund: parts.append(f"Fundamentals: {fund}")
+                    if tech: parts.append(f"Technical: {tech}")
                     return ' | '.join(parts)
 
                 # Short horizon

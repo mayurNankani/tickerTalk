@@ -1,32 +1,26 @@
 """Unit tests for the recommendation engine.
 
-Run with:  pytest tests/
+Run with: pytest tests/
 """
-import sys
-import os
-import pytest
 
-# Make core importable regardless of working directory
-sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
+import os
+import sys
+
+sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..")))
 
 from core.analysis.recommendation_engine import (
     WEIGHTS,
     ComponentScores,
+    build_recommendation_detail,
     compute_weighted_score,
     derive_rating,
-    build_recommendation_detail,
 )
 
-
-# ---------------------------------------------------------------------------
-# compute_weighted_score
-# ---------------------------------------------------------------------------
 
 class TestComputeWeightedScore:
     def test_short_term_ignores_fundamental(self):
         scores = ComponentScores(fundamental=100.0, technical=50.0, sentiment=50.0)
         result = compute_weighted_score("short", scores)
-        # fundamental weight is 0 for short
         expected = 50.0 * WEIGHTS["short"]["technical"] + 50.0 * WEIGHTS["short"]["sentiment"]
         assert abs(result - expected) < 1e-6
 
@@ -37,8 +31,8 @@ class TestComputeWeightedScore:
         assert abs(result - expected) < 1e-6
 
     def test_weights_sum_to_one(self):
-        for horizon, w in WEIGHTS.items():
-            total = sum(w.values())
+        for horizon, weights in WEIGHTS.items():
+            total = sum(weights.values())
             assert abs(total - 1.0) < 1e-9, f"Weights for '{horizon}' sum to {total}, expected 1.0"
 
     def test_all_zero_scores(self):
@@ -52,14 +46,10 @@ class TestComputeWeightedScore:
     def test_medium_term_all_components_matter(self):
         scores = ComponentScores(fundamental=80.0, technical=60.0, sentiment=40.0)
         result = compute_weighted_score("medium", scores)
-        w = WEIGHTS["medium"]
-        expected = 80.0 * w["fundamental"] + 60.0 * w["technical"] + 40.0 * w["sentiment"]
+        weights = WEIGHTS["medium"]
+        expected = 80.0 * weights["fundamental"] + 60.0 * weights["technical"] + 40.0 * weights["sentiment"]
         assert abs(result - expected) < 1e-6
 
-
-# ---------------------------------------------------------------------------
-# derive_rating
-# ---------------------------------------------------------------------------
 
 class TestDeriveRating:
     def test_buy_at_70(self):
@@ -81,10 +71,6 @@ class TestDeriveRating:
         assert derive_rating(0.0) == "sell"
 
 
-# ---------------------------------------------------------------------------
-# build_recommendation_detail
-# ---------------------------------------------------------------------------
-
 class TestBuildRecommendationDetail:
     def test_returns_all_keys(self):
         result = build_recommendation_detail("short", ComponentScores(0, 80, 60), ["Reason A"])
@@ -98,11 +84,9 @@ class TestBuildRecommendationDetail:
         scores = ComponentScores(fundamental=33.333, technical=33.333, sentiment=33.333)
         result = build_recommendation_detail("medium", scores, [])
         assert isinstance(result["score"], float)
-        # Verify at most 2 decimal places
         assert result["score"] == round(result["score"], 2)
 
     def test_strong_buy_scenario(self):
-        """All components very high → buy rating."""
         result = build_recommendation_detail("medium", ComponentScores(90, 90, 90), [])
         assert result["rating"] == "buy"
 

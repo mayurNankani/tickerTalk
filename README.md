@@ -51,7 +51,7 @@ python web/app.py
 
 ## Test and format
 ```bash
-pytest tests/
+pytest tests/unit
 black . && isort . && ruff check .
 ```
 
