@@ -167,7 +167,7 @@ class LLMService:
 
     def _call_ollama(self, prompt: str, model_key: str = 'llama3') -> str:
         """Call Ollama API"""
-        model = self.config.MODEL_MAP.get(model_key, 'llama3:8b')
+        model = self.config.MODEL_MAP.get(model_key, 'llama3:latest')
         
         try:
             start_time = time.time()

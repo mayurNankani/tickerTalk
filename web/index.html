@@ -11,8 +11,8 @@
     
     <link rel="stylesheet" href="style.css">
 </head>
-<body>
-    <header>
+<body @keydown.escape.window="/* handled by chat component */">
+    <header x-data="themeToggle">
         <div class="header-left">
             <svg class="logo-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
                 <polyline points="22 12 18 12 15 21 9 3 6 12 2 12"/>
@@ -20,13 +20,19 @@
             <div class="logo">Ticker<span>Talk</span></div>
         </div>
         <div class="header-right">
-            <button class="theme-toggle" id="themeToggle" title="Toggle theme">☀️</button>
+            <button class="theme-toggle" 
+                    :title="'Toggle theme'" 
+                    x-text="icon"
+                    @click="toggle()"></button>
         </div>
     </header>
 
-    <main>
-        <div class="chat-area" id="chatOutput">
-            <div class="empty-state">
+    <!-- Chat Interface Container - shared state for main and bottom-bar -->
+    <div x-data="chatInterface">
+    <main @keydown.escape.window="handleKeydown($event)">
+        <div class="chat-area">
+            <!-- Empty State -->
+            <div class="empty-state" x-show="!hasMessages()">
                 <div class="hero-icon">
                     <svg width="72" height="72" viewBox="0 0 72 72" fill="none" xmlns="http://www.w3.org/2000/svg">
                         <rect width="72" height="72" rx="18" fill="rgba(20,184,166,0.1)"/>
@@ -37,123 +43,242 @@
                 <h2>Welcome to TickerTalk</h2>
                 <p>Real-time stock analysis powered by AI. Ask about any company.</p>
                 <div class="example-chips">
-                    <button class="example-chip" onclick="useExample(this)">Analyse Apple</button>
-                    <button class="example-chip" onclick="useExample(this)">How is Tesla doing?</button>
-                    <button class="example-chip" onclick="useExample(this)">Give me a NVIDIA report</button>
+                    <button class="example-chip" @click="sendMessage('Analyse Apple')">Analyse Apple</button>
+                    <button class="example-chip" @click="sendMessage('How is Tesla doing?')">How is Tesla doing?</button>
+                    <button class="example-chip" @click="sendMessage('Give me a NVIDIA report')">Give me a NVIDIA report</button>
                 </div>
             </div>
 
             <!-- Market Overview Sections -->
-            <div class="market-overview" id="marketOverview">
-                <div class="market-summary" id="marketSummary" style="display: none;">
-                    <div class="market-summary-header">
-                        <div>
-                            <div class="market-summary-kicker" id="marketSummaryKicker">Market Summary</div>
-                            <div class="market-summary-title" id="marketSummaryTitle"></div>
+            <div class="market-overview" x-data="marketOverview">
+                <template x-if="hasData">
+                    <div>
+                        <!-- Market Summary -->
+                        <template x-if="marketSummary">
+                            <div class="market-summary" :class="marketSummary.trendPositive ? 'positive' : 'negative'">
+                                <div class="market-summary-header">
+                                    <div>
+                                        <div class="market-summary-kicker" x-text="marketSummary.marketOpen ? 'Live session summary' : 'Today on the market'"></div>
+                                        <div class="market-summary-title" x-text="'The market is trading ' + marketSummary.trendLabel + (marketSummary.marketOpen ? ' right now.' : ' the day.')"></div>
+                                    </div>
+                                    <div class="market-summary-badge" x-text="marketSummary.marketOpen ? 'Market Open' : 'Market Closed'"></div>
+                                </div>
+                                
+                                <!-- Index Buttons -->
+                                <div class="market-summary-actions">
+                                    <template x-for="index in marketSummary.indices" :key="index.symbol">
+                                        <button type="button" 
+                                                class="market-summary-btn"
+                                                :class="index.change_percent >= 0 ? 'positive' : 'negative'"
+                                                @click="$dispatch('open-modal', index)"
+                                                x-text="prettyIndexName(index.symbol) + ' ' + formatSignedPercent(index.change_percent)">
+                                        </button>
+                                    </template>
+                                    
+                                    <!-- Top Mover -->
+                                    <template x-if="marketSummary.leadingMover">
+                                        <button type="button"
+                                                class="market-summary-btn"
+                                                :class="marketSummary.leadingMover.change_percent >= 0 ? 'positive' : 'negative'"
+                                                @click="$dispatch('open-modal', marketSummary.leadingMover)"
+                                                x-text="'Top mover: ' + marketSummary.leadingMover.symbol + ' ' + formatSignedPercent(marketSummary.leadingMover.change_percent)">
+                                        </button>
+                                    </template>
+                                    
+                                    <!-- Top Loser -->
+                                    <template x-if="marketSummary.leadingLoser">
+                                        <button type="button"
+                                                class="market-summary-btn negative"
+                                                @click="$dispatch('open-modal', marketSummary.leadingLoser)"
+                                                x-text="'Top loser: ' + marketSummary.leadingLoser.symbol + ' ' + formatSignedPercent(marketSummary.leadingLoser.change_percent)">
+                                        </button>
+                                    </template>
+                                </div>
+                                
+                                <!-- Timestamp -->
+                                <div class="market-summary-meta">
+                                    <span class="market-summary-pill" x-text="'Updated ' + formatBrowserLocalTimestamp(marketSummary.timestamp)"></span>
+                                </div>
+                            </div>
+                        </template>
+
+                        <div class="market-toggle-row">
+                            <template x-if="mostActive.length > 0">
+                                <button type="button"
+                                        class="market-section-toggle"
+                                        @click="toggleSection('most_active')"
+                                        :class="{ 'active': isSectionActive('most_active') }">
+                                    <span>Most Active</span>
+                                    <span x-text="isSectionActive('most_active') ? '▼' : '▶'"></span>
+                                </button>
+                            </template>
+
+                            <template x-if="gainers.length > 0">
+                                <button type="button"
+                                        class="market-section-toggle"
+                                        @click="toggleSection('gainers')"
+                                        :class="{ 'active': isSectionActive('gainers') }">
+                                    <span>Top Gainers</span>
+                                    <span x-text="isSectionActive('gainers') ? '▼' : '▶'"></span>
+                                </button>
+                            </template>
+
+                            <template x-if="movers.length > 0">
+                                <button type="button"
+                                        class="market-section-toggle"
+                                        @click="toggleSection('movers')"
+                                        :class="{ 'active': isSectionActive('movers') }">
+                                    <span>Top Movers</span>
+                                    <span x-text="isSectionActive('movers') ? '▼' : '▶'"></span>
+                                </button>
+                            </template>
+
+                            <template x-if="losers.length > 0">
+                                <button type="button"
+                                        class="market-section-toggle"
+                                        @click="toggleSection('losers')"
+                                        :class="{ 'active': isSectionActive('losers') }">
+                                    <span>Top Losers</span>
+                                    <span x-text="isSectionActive('losers') ? '▼' : '▶'"></span>
+                                </button>
+                            </template>
                         </div>
-                        <div class="market-summary-badge" id="marketSummaryBadge">LIVE</div>
-                    </div>
-                    <div class="market-summary-text" id="marketSummaryText"></div>
-                    <div class="market-summary-actions" id="marketSummaryActions"></div>
-                    <div class="market-summary-meta" id="marketSummaryMeta"></div>
-                </div>
 
-                <!-- Most Active Section -->
-                <div class="market-section" id="activeSection" style="display: none;">
-                    <div class="market-section-title">Most Active</div>
-                    <div class="card-carousel" id="activeCarousel"></div>
-                </div>
+                        <div class="market-selected-row" x-show="activeMarketSection" x-collapse>
+                            <div class="card-carousel">
+                                <template x-for="item in activeSectionItems" :key="item.symbol + '-' + activeMarketSection">
+                                    <div class="market-card"
+                                         :data-symbol="item.symbol"
+                                         @click="$dispatch('open-modal', item)"
+                                         x-html="formatCardHTML(item, activeSectionShowVolume)"></div>
+                                </template>
+                            </div>
+                        </div>
+                    </div>
+                </template>
+            </div>
 
-                <div class="market-accordion-row">
-                    <div class="market-section" id="gainersSection">
-                        <div class="market-section-title">Top Gainers</div>
-                        <div class="card-carousel" id="gainersCarousel"></div>
-                    </div>
-                    <div class="market-section" id="moversSection">
-                        <div class="market-section-title">Top Movers</div>
-                        <div class="card-carousel" id="moversCarousel"></div>
-                    </div>
-                    <div class="market-section" id="losersSection">
-                        <div class="market-section-title">Top Losers</div>
-                        <div class="card-carousel" id="losersCarousel"></div>
+            <!-- Chat Messages -->
+            <template x-for="(msg, index) in chatHistory" :key="index">
+                <div>
+                    <!-- Tool Updates Chips -->
+                    <template x-if="msg.toolUpdates && msg.toolUpdates.length > 0">
+                        <div class="tool-chips-row">
+                            <template x-for="tool in msg.toolUpdates" :key="tool">
+                                <div class="tool-chip" x-text="tool"></div>
+                            </template>
+                        </div>
+                    </template>
+                    
+                    <!-- Message Content -->
+                    <div x-html="formatMessage(msg)"></div>
+                </div>
+            </template>
+
+            <!-- Loading Indicator -->
+            <div class="message" x-show="loading">
+                <div class="avatar agent-avatar">T</div>
+                <div class="message-body">
+                    <div class="message-label">TickerTalk</div>
+                    <div class="message-content agent">
+                        <div class="thinking-dots"><span></span><span></span><span></span></div>
                     </div>
                 </div>
             </div>
         </div>
 
         <!-- Quick Preview Modal -->
-        <div class="modal" id="previewModal">
+        <div class="modal" 
+             x-data="stockModal" 
+             :class="{ 'active': isOpen }"
+             @click.self="close()"
+             @open-modal.window="open($event.detail)">
             <div class="modal-content">
-                <button class="modal-close" onclick="closeModal()">✕</button>
+                <button class="modal-close" @click="close()">✕</button>
                 
                 <div class="modal-header">
-                    <img id="modalLogo" class="modal-logo" src="" alt="" onerror="this.style.display='none'" style="display:none"/>
+                    <img class="modal-logo" 
+                         :src="stock.logo_url || ''" 
+                         :alt="stock.symbol"
+                         x-show="stock.logo_url"
+                         @error="$el.style.display='none'"/>
                     <div>
-                        <div class="modal-symbol" id="modalSymbol">AAPL</div>
-                        <div class="modal-name" id="modalName">Apple Inc.</div>
+                        <div class="modal-symbol" x-text="stock.symbol || 'N/A'"></div>
+                        <div class="modal-name" x-text="stock.name || 'N/A'"></div>
                     </div>
                 </div>
 
                 <div class="modal-price-section">
-                    <div class="modal-price" id="modalPrice">$150.00</div>
-                    <div class="modal-change" id="modalChange">
-                        <span id="modalChangeIcon">▲</span>
-                        <span id="modalChangeValue">+1.23%</span>
+                    <div class="modal-price" x-text="stock.price ? '$' + stock.price.toFixed(2) : 'N/A'"></div>
+                    <div class="modal-change" :class="changeClass">
+                        <span x-text="changeIcon"></span>
+                        <span x-text="changeText"></span>
                     </div>
                 </div>
 
                 <div class="modal-details">
                     <div class="modal-detail-item">
                         <div class="modal-detail-label">52W High</div>
-                        <div class="modal-detail-value" id="modalHigh">$175.00</div>
+                        <div class="modal-detail-value" x-text="stock.week_52_high ? '$' + stock.week_52_high.toFixed(2) : 'N/A'"></div>
                     </div>
                     <div class="modal-detail-item">
                         <div class="modal-detail-label">52W Low</div>
-                        <div class="modal-detail-value" id="modalLow">$125.00</div>
+                        <div class="modal-detail-value" x-text="stock.week_52_low ? '$' + stock.week_52_low.toFixed(2) : 'N/A'"></div>
                     </div>
                     <div class="modal-detail-item">
                         <div class="modal-detail-label">Market Cap</div>
-                        <div class="modal-detail-value" id="modalMarketCap">$2.5T</div>
+                        <div class="modal-detail-value" x-text="formattedMarketCap"></div>
                     </div>
                     <div class="modal-detail-item">
                         <div class="modal-detail-label">Volume</div>
-                        <div class="modal-detail-value" id="modalVolume">52.3M</div>
+                        <div class="modal-detail-value" x-text="formattedVolume"></div>
                     </div>
                 </div>
 
                 <div class="modal-actions">
-                    <button class="modal-btn primary" onclick="analyzeFromModal()">Analyze</button>
-                    <button class="modal-btn secondary" onclick="closeModal()">Cancel</button>
+                    <button class="modal-btn primary" @click="analyze()">Analyze</button>
+                    <button class="modal-btn secondary" @click="close()">Cancel</button>
                 </div>
             </div>
         </div>
     </main>
 
-    <div id="scrollIndicator" title="Scroll to bottom">↓</div>
+    <div x-data="scrollIndicator" 
+         id="scrollIndicator" 
+         x-show="visible"
+         @click="scrollToBottom()"
+         title="Scroll to bottom">↓</div>
 
     <div class="bottom-bar">
         <div class="input-container">
-            <form class="chat-form" id="chatForm">
+            <form class="chat-form" @submit.prevent="sendMessage()">
                 <input
                     class="chat-input"
-                    id="chatInput"
+                    x-ref="chatInput"
+                    x-model="input"
                     placeholder="Ask about a company or stock..."
+                    :disabled="loading"
                     required
                     autocomplete="off"
                 />
-                <button type="submit" class="send-btn" title="Send">
+                <button type="submit" class="send-btn" title="Send" :disabled="loading">
                     <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
                         <line x1="22" y1="2" x2="11" y2="13"/>
                         <polygon points="22 2 15 22 11 13 2 9 22 2"/>
                     </svg>
                 </button>
-                <button type="button" id="stopBtn" class="stop-btn" title="Stop processing" aria-label="Stop processing" disabled>
+                <button type="button" 
+                        class="stop-btn" 
+                        @click="stopProcessing()"
+                        :disabled="!loading"
+                        title="Stop processing" 
+                        aria-label="Stop processing">
                     <span class="stop-square" aria-hidden="true"></span>
                 </button>
             </form>
 
             <div class="model-select-wrap">
-                <select id="modelSelect">
+                <select x-model="modelSelect">
                     <option value="llama3">Llama 3</option>
                     <option value="qwen3">Qwen 3</option>
                     <option value="gemma3">Gemma 3</option>
@@ -161,16 +286,30 @@
             </div>
 
             <div class="index-control">
-                <input id="indexInput" class="index-input-field" title="Select or type an index symbol (e.g. ^GSPC) or 'SYMBOL|Friendly Name'" placeholder="Index (e.g. ^GSPC)" />
-                <div id="indexSuggestions" class="index-suggestions" aria-hidden="true"></div>
+                <input class="index-input-field" 
+                       title="Select or type an index symbol (e.g. ^GSPC) or 'SYMBOL|Friendly Name'" 
+                       placeholder="Index (e.g. ^GSPC)" />
+                <div class="index-suggestions" aria-hidden="true"></div>
             </div>
 
-            <div id="indexMsg" style="display:none;"></div>
+            <div style="display:none;"></div>
 
-            <button type="button" id="resetBtn" class="secondary">Reset</button>
+            <button type="button" 
+                    class="secondary" 
+                    @click="reset()"
+                    :disabled="loading">Reset</button>
         </div>
     </div>
+    </div> <!-- End chat interface container -->
 
+    <!-- Application Scripts - Load BEFORE Alpine -->
+    <script src="utils.js"></script>
+    <script src="services.js"></script>
+    <script src="components.js"></script>
     <script src="main.js"></script>
+    
+    <!-- Alpine.js - Load LAST with defer -->
+    <script defer src="https://cdn.jsdelivr.net/npm/@alpinejs/collapse@3.x.x/dist/cdn.min.js"></script>
+    <script defer src="https://cdn.jsdelivr.net/npm/alpinejs@3.x.x/dist/cdn.min.js"></script>
 </body>
 </html>

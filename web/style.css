@@ -701,6 +701,64 @@
             display: none;
         }
 
+        .market-section-toggle {
+            width: 100%;
+            background: var(--surface-2);
+            border: 1px solid var(--border);
+            border-radius: 8px;
+            padding: 0.75rem 1rem;
+            font-size: 0.95rem;
+            font-weight: 600;
+            color: var(--text-1);
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            cursor: pointer;
+            transition: all 0.2s ease;
+            margin-bottom: 0;
+        }
+
+        .market-section-toggle:hover {
+            background: color-mix(in srgb, var(--accent) 12%, var(--surface-2));
+            border-color: var(--accent);
+        }
+
+        .market-section-toggle.active {
+            background: linear-gradient(180deg, color-mix(in srgb, var(--accent) 22%, var(--surface-2)) 0%, color-mix(in srgb, var(--accent-dark) 28%, var(--surface-2)) 100%);
+            border-color: var(--accent);
+            color: var(--accent-light);
+            box-shadow: 0 0 0 1px color-mix(in srgb, var(--accent) 35%, transparent), 0 6px 14px rgba(20, 184, 166, 0.18);
+        }
+
+        .market-section-toggle span:last-child {
+            font-size: 0.8rem;
+            opacity: 0.7;
+        }
+
+        .market-section-toggle.active span:last-child {
+            opacity: 1;
+        }
+
+        .market-toggle-row {
+            display: grid;
+            grid-template-columns: repeat(2, minmax(0, 1fr));
+            gap: 0.5rem;
+            margin-bottom: 0.85rem;
+        }
+
+        .market-selected-row {
+            margin-bottom: 2rem;
+            animation: fadeSlideIn 0.25s ease forwards;
+        }
+
+        @media (min-width: 700px) {
+            .market-toggle-row {
+                grid-template-columns: repeat(4, minmax(0, 1fr));
+            }
+        }
+
         .card-carousel {
             display: grid;
             grid-template-columns: repeat(2, minmax(0, 1fr));
