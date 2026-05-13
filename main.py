@@ -1,5 +1,5 @@
-from src.agent import StockAnalysisAgent
-from src.agent import FUNDAMENTAL_TOOLTIPS, TECHNICAL_TOOLTIPS
+from src.agent_improved import StockAnalysisAgentImproved as StockAnalysisAgent
+from src.agent_improved import FUNDAMENTAL_TOOLTIPS, TECHNICAL_TOOLTIPS
 
 def print_welcome():
     print("\n=== Stock Market Analysis Chatbot ===")

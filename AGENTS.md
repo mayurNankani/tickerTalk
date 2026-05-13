@@ -31,7 +31,6 @@ stockMarketAgent/
 │
 ├── src/                         # Legacy tooling (partially migrated)
 │   ├── agent_improved.py        # StockAnalysisAgentImproved — fundamental/technical/sentiment scoring
-│   ├── mcp_agent.py             # YahooFinanceAgent — earnings & raw quote helper
 │   └── tools/                   # Atomic tools (kept for backwards-compat)
 │       ├── company_search.py
 │       ├── fundamental_analysis.py
@@ -39,8 +38,7 @@ stockMarketAgent/
 │       ├── finnhub_news.py
 │       ├── sentiment_analysis.py  # FinBERT wrapper (MPS/CUDA/CPU auto-select)
 │       ├── web_search.py          # DuckDuckGo search helper
-│       ├── article_scraper.py     # Full article text fetcher
-│       └── intraday_graph.py      # DEPRECATED — do not add new usages
+│       └── article_scraper.py     # Full article text fetcher
 │
 ├── web/                         # Flask presentation layer
 │   ├── app.py                   # Application factory (create_app)
@@ -222,7 +220,7 @@ gunicorn --workers 2 --timeout 120 --bind 0.0.0.0:5001 wsgi:app
 
 ## Adding a New Tool
 
-1. Add a schema entry to `TOOL_SCHEMAS` in `web/services/agent_tools.py`.
+1. Add a schema entry to `TOOL_SCHEMAS` in `web/services/tool_schemas.py`.
 2. Add a handler method `_my_tool(self, args)` to `ToolExecutor`.
 3. Register it in the `handlers` dict inside `execute()`.
 4. The tool description is automatically injected into the system prompt at startup — no prompt edits needed.
@@ -248,6 +246,5 @@ gunicorn --workers 2 --timeout 120 --bind 0.0.0.0:5001 wsgi:app
 
 ## Deprecated
 
-- `src/tools/intraday_graph.py` — do not add new callers; will be removed.
 - Direct `src/mcp_orchestrator.py` usage — file deleted; use `StockAnalysisUseCase` instead.
 - Direct `src/agent.py` usage — file deleted; use `StockAnalysisAgentImproved`.

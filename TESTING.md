@@ -3,7 +3,7 @@
 ## Current smoke tests
 ```bash
 source .venv/bin/activate
-pytest tests/
+pytest tests/unit
 ```
 
 ## Live app checks
@@ -27,16 +27,16 @@ Expected result:
 ## Recommendation engine tests
 The repository still includes the older comparison scripts for historical context:
 ```bash
-./test_comparison.sh AAPL
-.venv/bin/python compare_systems.py AAPL
+./scripts/testing/test_comparison.sh AAPL
+.venv/bin/python scripts/testing/compare_systems.py AAPL
 ```
 
-Those scripts compare the old and improved scoring systems; they are not part of the chat UI path.
+Those scripts print recommendation output from the current scoring engine; they are not part of the chat UI path.
 
 ## Useful checks
-- `tests/test_recommendation_engine.py` verifies the weighting rules.
-- `tests/test_stock_service.py` checks ticker resolution.
-- `tests/test_cache.py` covers the in-memory TTL cache.
+- `tests/unit/test_recommendation_engine.py` verifies the weighting rules.
+- `tests/unit/test_stock_service.py` checks ticker resolution.
+- `tests/unit/test_cache.py` covers the in-memory TTL cache.
 
 ## What to verify manually
 1. The backend returns `analysis_html` for analysis-style requests.

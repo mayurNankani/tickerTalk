@@ -1,8 +1,11 @@
 """Unit tests for TTLCache utility."""
-import sys, os, time, threading
-sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..', 'web')))
+import os
+import sys
+import threading
+import time
 
-import pytest
+sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", "web")))
+
 from utils.cache import TTLCache
 
 
@@ -18,8 +21,7 @@ class TestTTLCache:
 
     def test_expired_entry_returns_none(self):
         cache = TTLCache()
-        cache.set("k", "v", ttl=0)  # expires immediately
-        # Force time to advance past TTL by checking after a tiny sleep
+        cache.set("k", "v", ttl=0)
         time.sleep(0.01)
         assert cache.get("k") is None
 
@@ -51,13 +53,13 @@ class TestTTLCache:
             try:
                 for j in range(50):
                     cache.set(f"key_{i}_{j}", i * j)
-            except Exception as e:
-                errors.append(e)
+            except Exception as exc:
+                errors.append(exc)
 
         threads = [threading.Thread(target=writer, args=(i,)) for i in range(10)]
-        for t in threads:
-            t.start()
-        for t in threads:
-            t.join()
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join()
 
         assert errors == [], f"Thread safety errors: {errors}"

@@ -59,7 +59,7 @@ class YahooFinanceScreenerAdapter(MarketScreenerAdapter):
             market_caps = [x for x in combined if x.symbol in self.TOP_MARKET_CAP_SYMBOLS]
 
             movers = sorted(universe, key=lambda x: abs(x.change_percent), reverse=True)[:5]
-            gainers = sorted(market_caps, key=lambda x: x.market_cap or 0, reverse=True)[:5]
+            gainers = sorted(universe, key=lambda x: x.change_percent or 0, reverse=True)[:5]
             losers = sorted(universe, key=lambda x: x.change_percent)[:5]
             most_active = sorted(universe, key=lambda x: x.volume or 0, reverse=True)[:5]
             
@@ -121,6 +121,20 @@ class YahooFinanceScreenerAdapter(MarketScreenerAdapter):
                 except Exception:
                     pass
 
+                # Use the same display-name convention as the main quote adapter so
+                # market cards show the ticker on top and the company/index name below.
+                try:
+                    info = ticker.info or {}
+                    name = (
+                        info.get('shortName')
+                        or info.get('longName')
+                        or info.get('displayName')
+                        or info.get('name')
+                        or name
+                    )
+                except Exception:
+                    pass
+
                 # Avoid heavy info calls for every symbol; fallback to lightweight history only if needed.
                 if price is None:
                     try:
@@ -163,6 +177,6 @@ class YahooFinanceScreenerAdapter(MarketScreenerAdapter):
     
     def _get_indices(self) -> List[MarketListItem]:
         """Fetch major market indices (faster than screeners)."""
-        indices_symbols = ['^GSPC', '^IXIC', '^DJI']  # Reduced set for speed
+        indices_symbols = ['^GSPC', '^IXIC', '^DJI', '^RUT']  # Reduced set for speed
         return self._fetch_snapshots(indices_symbols)
 

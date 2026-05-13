@@ -5,6 +5,7 @@ Data access layer for stock information from external sources
 
 import sys
 import os
+from datetime import date, datetime
 from typing import Dict, Any, Optional, List
 from abc import ABC, abstractmethod
 
@@ -154,13 +155,103 @@ class StockRepository(IStockRepository):
         return result
     
     def get_earnings(self, ticker: str) -> Dict[str, Any]:
-        """Get earnings data"""
-        # Temporarily still using original agent for earnings until adapter added
-        from src.mcp_agent import YahooFinanceAgent  # local import to reduce top-level legacy dependency
-        return YahooFinanceAgent().handle({
-            "action": "get_earnings",
-            "parameters": {"ticker": ticker}
-        })
+        """Get earnings data from yfinance in a stable response shape."""
+        import yfinance as yf
+
+        def _normalize_calendar_value(value: Any):
+            """Convert yfinance calendar values into JSON-friendly, readable primitives."""
+            if isinstance(value, (date, datetime)):
+                return value.isoformat()
+            if isinstance(value, list):
+                normalized = [_normalize_calendar_value(v) for v in value if v is not None]
+                if not normalized:
+                    return None
+                if len(normalized) == 1:
+                    return normalized[0]
+                return normalized
+            return str(value) if value is not None else None
+
+        symbol = ticker.upper()
+        try:
+            stock = yf.Ticker(symbol)
+
+            next_earnings: Optional[Dict[str, Any]] = None
+            try:
+                calendar = stock.calendar
+                if isinstance(calendar, dict):
+                    next_earnings = {
+                        key: _normalize_calendar_value(value)
+                        for key, value in calendar.items()
+                        if value is not None
+                    }
+                elif isinstance(calendar, list) and calendar:
+                    first = calendar[0]
+                    if isinstance(first, dict):
+                        next_earnings = {
+                            key: _normalize_calendar_value(value)
+                            for key, value in first.items()
+                            if value is not None
+                        }
+                elif calendar is not None and not calendar.empty:
+                    first = calendar.iloc[0]
+                    next_earnings = {
+                        col: _normalize_calendar_value(first[col])
+                        for col in calendar.columns
+                    }
+            except Exception:
+                next_earnings = None
+
+            # Enrich with timestamp hints from info when available.
+            # yfinance often exposes call timing as unix timestamps in info,
+            # while calendar may only include date/session text.
+            try:
+                info = stock.info or {}
+                if next_earnings is None:
+                    next_earnings = {}
+                for key in (
+                    "earningsTimestamp",
+                    "earningsCallTimestampStart",
+                    "earningsCallTimestampEnd",
+                    "isEarningsDateEstimate",
+                ):
+                    value = info.get(key)
+                    if value is not None and key not in next_earnings:
+                        next_earnings[key] = _normalize_calendar_value(value)
+                if not next_earnings:
+                    next_earnings = None
+            except Exception:
+                pass
+
+            earnings_history: List[Dict[str, Any]] = []
+            try:
+                earnings_dates = stock.earnings_dates
+                if earnings_dates is not None and not earnings_dates.empty:
+                    for idx, row in earnings_dates.head(10).iterrows():
+                        record = {k: (None if row[k] is None else str(row[k])) for k in earnings_dates.columns}
+                        record["date"] = str(idx)
+                        earnings_history.append(record)
+            except Exception:
+                earnings_history = []
+
+            return {
+                "status": "ok",
+                "data": {
+                    "symbol": symbol,
+                    "next_earnings": next_earnings,
+                    "earnings_history": earnings_history,
+                },
+                "error": None,
+            }
+        except Exception as e:
+            return {
+                "status": "error",
+                "data": {
+                    "symbol": symbol,
+                    "next_earnings": None,
+                    "earnings_history": [],
+                },
+                "error": str(e),
+            }
     
     def get_stock_info(self, ticker: str) -> Dict[str, Any]:
         """Get comprehensive stock info from yfinance"""

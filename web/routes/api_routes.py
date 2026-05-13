@@ -3,14 +3,18 @@ API Routes Blueprint
 RESTful endpoints for data fetching
 """
 
+import os
 import threading
 import time
-from flask import Blueprint, request, jsonify
+import urllib.request
+from flask import Blueprint, request, jsonify, Response
 from services import StockAnalysisService
 from utils.cache import TTLCache
 
 
 market_overview_cache = TTLCache(default_ttl=120)
+# Logo bytes cached for 24 hours — logos rarely change
+_logo_cache: TTLCache = TTLCache(default_ttl=86400)
 _market_refresh_started = False
 _market_refresh_lock = threading.Lock()
 
@@ -27,79 +31,34 @@ def _market_overview_cache_key(cache_seconds: int) -> str:
     return f"market_overview:{cache_seconds}"
 
 
+def _make_logo_url(symbol: str) -> str:
+    """Return a server-proxied logo URL so the browser loads from localhost."""
+    return f"/api/logo/{symbol}"
+
+
+def _serialize_item(item) -> dict:
+    return {
+        'symbol': item.symbol,
+        'name': item.name,
+        'price': item.price,
+        'change_percent': item.change_percent,
+        'change_absolute': item.change_absolute,
+        'market_cap': item.market_cap,
+        'volume': item.volume,
+        'week_52_high': item.week_52_high,
+        'week_52_low': item.week_52_low,
+        'logo_url': _make_logo_url(item.symbol),
+    }
+
+
 def _serialize_market_overview(overview) -> dict:
     return {
-        'movers': [
-            {
-                'symbol': item.symbol,
-                'name': item.name,
-                'price': item.price,
-                'change_percent': item.change_percent,
-                'change_absolute': item.change_absolute,
-                'market_cap': item.market_cap,
-                'volume': item.volume,
-                'week_52_high': item.week_52_high,
-                'week_52_low': item.week_52_low,
-            }
-            for item in overview.movers
-        ],
-        'gainers': [
-            {
-                'symbol': item.symbol,
-                'name': item.name,
-                'price': item.price,
-                'change_percent': item.change_percent,
-                'change_absolute': item.change_absolute,
-                'market_cap': item.market_cap,
-                'volume': item.volume,
-                'week_52_high': item.week_52_high,
-                'week_52_low': item.week_52_low,
-            }
-            for item in overview.gainers
-        ],
-        'losers': [
-            {
-                'symbol': item.symbol,
-                'name': item.name,
-                'price': item.price,
-                'change_percent': item.change_percent,
-                'change_absolute': item.change_absolute,
-                'market_cap': item.market_cap,
-                'volume': item.volume,
-                'week_52_high': item.week_52_high,
-                'week_52_low': item.week_52_low,
-            }
-            for item in overview.losers
-        ],
-        'most_active': [
-            {
-                'symbol': item.symbol,
-                'name': item.name,
-                'price': item.price,
-                'change_percent': item.change_percent,
-                'change_absolute': item.change_absolute,
-                'market_cap': item.market_cap,
-                'volume': item.volume,
-                'week_52_high': item.week_52_high,
-                'week_52_low': item.week_52_low,
-            }
-            for item in overview.most_active
-        ],
-        'indices': [
-            {
-                'symbol': item.symbol,
-                'name': item.name,
-                'price': item.price,
-                'change_percent': item.change_percent,
-                'change_absolute': item.change_absolute,
-                'market_cap': item.market_cap,
-                'volume': item.volume,
-                'week_52_high': item.week_52_high,
-                'week_52_low': item.week_52_low,
-            }
-            for item in overview.indices
-        ],
-        'timestamp': overview.timestamp.isoformat(),
+        'movers':      [_serialize_item(i) for i in overview.movers],
+        'gainers':     [_serialize_item(i) for i in overview.gainers],
+        'losers':      [_serialize_item(i) for i in overview.losers],
+        'most_active': [_serialize_item(i) for i in overview.most_active],
+        'indices':     [_serialize_item(i) for i in overview.indices],
+        'timestamp':   overview.timestamp.isoformat(),
     }
 
 
@@ -171,6 +130,42 @@ def init_api_routes(stock_service: StockAnalysisService):
             return jsonify(price_data)
         except Exception as e:
             return jsonify({'error': str(e)}), 500
+
+    @api_bp.route('/logo/<symbol>', methods=['GET'])
+    def get_logo(symbol: str):
+        """Proxy company logo from Finnhub, cached server-side for 24 hours."""
+        # Basic validation — only uppercase letters/digits, 1-6 chars
+        import re
+        if not re.match(r'^[A-Z0-9]{1,6}$', symbol.upper()):
+            return '', 404
+        symbol = symbol.upper()
+
+        cached = _logo_cache.get(symbol)
+        if cached is not None:
+            data, content_type = cached
+            resp = Response(data, status=200, mimetype=content_type)
+            resp.headers['Cache-Control'] = 'public, max-age=86400'
+            return resp
+
+        token = os.environ.get('FINNHUB_API_KEY', '')
+        url = f"https://finnhub.io/api/logo?symbol={symbol}&token={token}"
+        try:
+            req = urllib.request.Request(url, headers={'User-Agent': 'Mozilla/5.0'})
+            with urllib.request.urlopen(req, timeout=5) as r:
+                data = r.read()
+                ct = r.headers.get('Content-Type', 'image/png')
+                # Only cache and serve actual image bytes
+                if not ct.startswith('image/') and not ct.startswith('application/octet'):
+                    return '', 404
+                # Normalise generic octet-stream to png
+                if 'octet' in ct:
+                    ct = 'image/png'
+                _logo_cache.set(symbol, (data, ct))
+                resp = Response(data, status=200, mimetype=ct)
+                resp.headers['Cache-Control'] = 'public, max-age=86400'
+                return resp
+        except Exception:
+            return '', 404
 
     @api_bp.route('/market-overview', methods=['GET'])
     def get_market_overview():
