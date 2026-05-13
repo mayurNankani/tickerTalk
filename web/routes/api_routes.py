@@ -58,7 +58,7 @@ def _serialize_market_overview(overview) -> dict:
         'losers':      [_serialize_item(i) for i in overview.losers],
         'most_active': [_serialize_item(i) for i in overview.most_active],
         'indices':     [_serialize_item(i) for i in overview.indices],
-        'timestamp':   overview.timestamp.isoformat(),
+        'timestamp':   overview.timestamp.isoformat() + 'Z',  # Add 'Z' to indicate UTC
     }
 
 
